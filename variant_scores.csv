@@ -1,0 +1,4 @@
+variant_id,gene,cadd,polyphen,sift,clinvar
+chr17:7579472:C:T,TP53,28.3,probably_damaging,damaging,likely_pathogenic
+chr12:25398284:G:A,KRAS,23.1,probably_damaging,damaging,VUS
+chr5:112175770:C:T,APC,18.0,possibly_damaging,tolerated,likely_benign
