@@ -27,37 +27,78 @@ from starlette.middleware.base import BaseHTTPMiddleware
 # ----------------------
 load_dotenv()
 
-def as_bool(val: Optional[str], default: bool = False) -> bool:
+def _as_bool(val: Optional[str], default: bool = False) -> bool:
     if val is None:
         return default
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
+def _parse_candidates(raw: Optional[str]) -> List[str]:
+    """
+    Accepts either a JSON list (["a","b"]) or a comma-separated string ("a,b").
+    """
+    if not raw:
+        return []
+    raw = raw.strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip()]
+    except Exception:
+        pass
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+def _parse_vram_catalog(raw: Optional[str]) -> Dict[str, float]:
+    """
+    Accepts either JSON {"m":8} or "m=8, x=4".
+    """
+    if not raw:
+        return {}
+    raw = raw.strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): float(v) for k, v in data.items()}
+    except Exception:
+        pass
+    cat: Dict[str, float] = {}
+    for tok in raw.split(","):
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            try:
+                cat[k.strip()] = float(v.strip())
+            except Exception:
+                continue
+    return cat
+
 ENV: Dict[str, Any] = {
-    "VARIANT_SCORES_PATH": os.getenv("VARIANT_SCORES_PATH", "./variant_scores.csv"),
+    # accept either VARIANT_SCORES_PATH or legacy SCORES_CSV
+    "VARIANT_SCORES_PATH": os.getenv("VARIANT_SCORES_PATH", os.getenv("SCORES_CSV", "./variant_scores.csv")),
     "POLICY_FILE": os.getenv("POLICY_FILE", "./policies/default.yaml"),
     "GENE_KNOWLEDGE_CSV": os.getenv("GENE_KNOWLEDGE_CSV", "./data/gene_knowledge.csv"),
 
     "MAX_VARIANTS_PER_PATIENT": int(os.getenv("MAX_VARIANTS_PER_PATIENT", "400")),
 
-    "AUDIT_ENABLED": as_bool(os.getenv("AUDIT_ENABLED", "true")),
+    "AUDIT_ENABLED": _as_bool(os.getenv("AUDIT_ENABLED", "true")),
     "AUDIT_DIR": os.getenv("AUDIT_DIR", "./audit"),
 
     "LLM_PROVIDER": os.getenv("LLM_PROVIDER", "OLLAMA"),
     "OLLAMA_HOST": os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"),
-    "LLM_CANDIDATES": [s.strip() for s in os.getenv("LLM_CANDIDATES", "qwen2.5:7b-instruct,qwen2.5:3b-instruct,phi3:mini,llama3:8b-instruct").split(",") if s.strip()],
+    # support both LLM_CANDIDATES and MODEL_CANDIDATES
+    "LLM_CANDIDATES": _parse_candidates(os.getenv("LLM_CANDIDATES") or os.getenv("MODEL_CANDIDATES", "qwen2.5:7b-instruct, qwen2.5:3b-instruct, phi3:mini")),
     "LLM_MIN_VRAM_GB": float(os.getenv("LLM_MIN_VRAM_GB", "6.0")),
     "LLM_TIMEOUT_SECONDS": int(os.getenv("LLM_TIMEOUT_SECONDS", "25")),
     "LLM_TEMPERATURE": float(os.getenv("LLM_TEMPERATURE", "0.2")),
-    "LLM_VRAM_CATALOG": json.loads(os.getenv("LLM_VRAM_CATALOG", json.dumps({
+    # support both JSON and "m=8, x=4"
+    "LLM_VRAM_CATALOG": (_parse_vram_catalog(os.getenv("LLM_VRAM_CATALOG")) or _parse_vram_catalog(os.getenv("MODEL_CATALOG")) or {
         "qwen2.5:7b-instruct": 8.0,
         "llama3:8b-instruct": 8.0,
         "qwen2.5:3b-instruct": 4.0,
         "phi3:mini": 3.0
-    }))),
+    }),
 
-    "SYSTEM_PROMPT_FILE": os.getenv("SYSTEM_PROMPT_FILE", "./prompts/system_en.txt"),
+    "SYSTEM_PROMPT_FILE": os.getenv("SYSTEM_PROMPT_FILE", "./prompts/system_prompt_en.txt"),
     "SUMMARY_INSTRUCTIONS_FILE": os.getenv("SUMMARY_INSTRUCTIONS_FILE", "./prompts/summary_instructions_en.txt"),
-    "SEND_EHR_TO_LLM": as_bool(os.getenv("SEND_EHR_TO_LLM", "true")),
+    "SEND_EHR_TO_LLM": _as_bool(os.getenv("SEND_EHR_TO_LLM", "true")),
     "SUMMARY_MAX_WORDS": int(os.getenv("SUMMARY_MAX_WORDS", "0")),
 
     "CADD_MAX": float(os.getenv("CADD_MAX", "40")),
@@ -389,7 +430,7 @@ def _fallback_summary(patient_id: str, pv: List[PrioritizedVariant], ehr: Option
 # ----------------------
 # FastAPI + middleware
 # ----------------------
-app = FastAPI(title="Genomic CDSS API", version="1.0.1")
+app = FastAPI(title="Genomic CDSS API", version="1.0.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -522,12 +563,10 @@ async def upload_variants(patient_id: str = Form(...), file: UploadFile = File(.
 
     lines = content.splitlines()
     header = lines[0] if lines else ""
-    # Treat as VCF if starts with '##' or has '#CHROM' line (even if header spacing is odd)
     if header.startswith("##") or any(l.startswith("#CHROM") for l in lines[:5]):
         for line in lines:
             if not line or line.startswith("#"):
                 continue
-            # Ensure tab-splitting; if space-delimited VCF, replace multiple spaces with a tab
             if "\t" not in line and "  " in line:
                 line = "\t".join([c for c in line.split() if c != ""])
             r = normalize_vcf_line(line)
@@ -580,7 +619,7 @@ async def upload_ehr(patient_id: str = Form(...), file: UploadFile = File(None),
 # ----------------------
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest, request: Request):
-    _start = time.perf_counter()  # <-- local timing start
+    _start = time.perf_counter()
     patient_id = req.patient_id
     stored = UPLOAD_STORE.get(patient_id, {})
     variants_in = req.variants or [VariantInput(**v) for v in stored.get("variants", [])]
@@ -590,7 +629,6 @@ def analyze(req: AnalyzeRequest, request: Request):
     if not rows:
         return error("NO_VARIANTS", "No variants provided (upload first or include in body).", status=400)
 
-    # do NOT require gene here; annotator will supply for scoring
     bad = validate_variants(rows, require_gene=False)
     if bad:
         payload = bad.body
@@ -613,10 +651,8 @@ def analyze(req: AnalyzeRequest, request: Request):
         ))
     prioritized.sort(key=lambda x: x.priority_score, reverse=True)
 
-    # local duration
     _duration_ms = int((time.perf_counter() - _start) * 1000)
 
-    # Audit
     if ENV["AUDIT_ENABLED"]:
         audit_artifact = {
             "ts": _ts(),
@@ -645,8 +681,8 @@ def analyze(req: AnalyzeRequest, request: Request):
 # ----------------------
 @app.post("/llm_summary", response_model=LLMResponse)
 def llm_summary(req: LLMRequest, request: Request):
-    _start = time.perf_counter()  # <-- local timing start
-    model = MODEL_SELECTED if ENV["LLM_PROVIDER"].upper() == "OLLAMA" else None
+    _start = time.perf_counter()
+    model = choose_llm_model(ENV["LLM_CANDIDATES"], ENV["LLM_MIN_VRAM_GB"], ENV["LLM_VRAM_CATALOG"]) if ENV["LLM_PROVIDER"].upper() == "OLLAMA" else None
 
     ehr_for_prompt = req.ehr.dict() if (req.ehr and ENV["SEND_EHR_TO_LLM"]) else None
     prompt = build_llm_prompt(ehr_for_prompt, req.variants)
@@ -666,10 +702,8 @@ def llm_summary(req: LLMRequest, request: Request):
         used_fallback = True
         text = _fallback_summary(req.patient_id, req.variants, ehr_for_prompt)
 
-    # local duration
     _duration_ms = int((time.perf_counter() - _start) * 1000)
 
-    # Audit
     if ENV["AUDIT_ENABLED"]:
         h = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         audit_artifact = {
@@ -703,12 +737,13 @@ def health_all():
     exists_knowledge = Path(ENV["GENE_KNOWLEDGE_CSV"]).exists()
     audit_writable = os.access(ENV["AUDIT_DIR"], os.W_OK)
     return {
-        "ok": True,
+        "ok": bool(exists_policy and exists_scores),
         "policy_file": {"path": ENV["POLICY_FILE"], "exists": exists_policy, "version": POLICY_VERSION},
         "scores_file": {"path": ENV["VARIANT_SCORES_PATH"], "exists": exists_scores},
         "knowledge_file": {"path": ENV["GENE_KNOWLEDGE_CSV"], "exists": exists_knowledge},
         "audit": {"path": ENV["AUDIT_DIR"], "writable": audit_writable, "enabled": ENV["AUDIT_ENABLED"]},
-        "llm": {"provider": ENV["LLM_PROVIDER"], "selected_model": MODEL_SELECTED},
+        "llm": {"provider": ENV["LLM_PROVIDER"], "selected_model": choose_llm_model(ENV["LLM_CANDIDATES"], ENV["LLM_MIN_VRAM_GB"], ENV["LLM_VRAM_CATALOG"])},
+        "service": {"name": "Genomic CDSS API", "version": "1.0.2"},
     }
 
 @app.get("/config")
@@ -727,13 +762,13 @@ def get_config():
             "provider": ENV["LLM_PROVIDER"],
             "candidates": ENV["LLM_CANDIDATES"],
             "min_vram_gb": ENV["LLM_MIN_VRAM_GB"],
-            "selected": MODEL_SELECTED,
             "timeout_s": ENV["LLM_TIMEOUT_SECONDS"],
             "temperature": ENV["LLM_TEMPERATURE"],
+            "vram_catalog": ENV["LLM_VRAM_CATALOG"],
         },
         "policy_version": POLICY_VERSION,
     }
 
 @app.get("/")
 def root():
-    return {"ok": True, "name": "Genomic CDSS API", "version": "1.0.1", "policy_version": POLICY_VERSION}
+    return {"ok": True, "name": "Genomic CDSS API", "version": "1.0.2", "policy_version": POLICY_VERSION}
