@@ -1,31 +1,26 @@
-/* Base reset & typography */
+/* Dark theme variables */
 :root {
-  --bg: #f8fafc;
-  --card: #ffffff;
-  --border: #e5e7eb;
-  --muted: #6b7280;
-  --text: #111827;
+  --bg: #0d0d0d;           /* almost black */
+  --card: #1c1c1c;         /* dark gray cards */
+  --border: #333333;       /* subtle borders */
+  --muted: #9ca3af;        /* muted gray */
+  --text: #e5e7eb;         /* light gray text */
   --blue: #3b82f6;
   --blue-border: #2563eb;
 
-  --danger: #b91c1c;
-  --success: #065f46;
+  --danger: #f87171;
+  --success: #10b981;
 
-  --high-bg: #fee2e2;
-  --high-fg: #c81e1e;
-  --med-bg: #fef3c7;
-  --med-fg: #b45309;
-  --low-bg: #d1fae5;
-  --low-fg: #065f46;
+  --high-bg: #7f1d1d;  --high-fg: #fca5a5;
+  --med-bg:  #78350f;  --med-fg: #fcd34d;
+  --low-bg:  #064e3b;  --low-fg: #6ee7b7;
 
   --radius: 10px;
 }
 
 * { box-sizing: border-box; }
 
-html, body, #root {
-  height: 100%;
-}
+html, body, #root { height: 100%; }
 
 body {
   margin: 0;
@@ -34,6 +29,5 @@ body {
   color: var(--text);
 }
 
-/* Generic elements */
-a { color: #0a58ca; text-decoration: none; }
+a { color: #60a5fa; text-decoration: none; }
 a:hover { text-decoration: underline; }

@@ -5,26 +5,20 @@
   padding: 0 16px;
 }
 
-.h1 {
-  font-size: 28px;
-  margin: 0 0 12px 0;
-}
+.h1 { font-size: 28px; margin: 0 0 12px 0; color: var(--text); }
+.h2 { font-size: 20px; margin: 8px 0 12px; color: var(--text); }
 
-.h2 {
-  font-size: 20px;
-  margin: 8px 0 12px;
-}
-
-/* Transparency / header info */
+/* Transparency strip */
 .transparency {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  background: #f3f4f6;
+  background: #1a1a1a;
   padding: 12px;
   border-radius: 8px;
   margin-bottom: 16px;
   font-size: 14px;
+  color: var(--text);
 }
 
 /* Cards */
@@ -34,43 +28,26 @@
   padding: 16px;
   border-radius: var(--radius);
   margin-bottom: 16px;
+  color: var(--text);
 }
 
 /* Flex helpers */
-.row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row-between { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.box { display: flex; align-items: center; gap: 8px; }
 
-.row-between {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.box {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.label {
-  width: 160px;
-  display: inline-block;
-}
+.label { width: 160px; display: inline-block; }
 
 /* Buttons & inputs */
 .button {
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid #d1d5db;
-  background: #f9fafb;
+  border: 1px solid #444;
+  background: #222;
+  color: var(--text);
   cursor: pointer;
 }
+.button:hover { background: #2d2d2d; }
 
 .button-primary {
   padding: 8px 12px;
@@ -84,8 +61,9 @@
 .button-secondary {
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid #6b7280;
-  background: #f3f4f6;
+  border: 1px solid #555;
+  background: #2a2a2a;
+  color: var(--text);
   cursor: pointer;
 }
 
@@ -93,61 +71,108 @@
   width: 80px;
   padding: 6px 8px;
   border-radius: 6px;
-  border: 1px solid #d1d5db;
-  background: #fff;
+  border: 1px solid #555;
+  background: #111;
+  color: var(--text);
 }
 
-.input.text {
-  width: 160px;
-}
 
-/* Table */
+/* Table: auto-fit with wrapping; smaller numbers */
 .table {
   width: 100%;
   border-collapse: collapse;
   font-size: 14px;
+  table-layout: auto;           /* let the browser size columns */
 }
-
 .table th, .table td {
   border-bottom: 1px solid var(--border);
   text-align: left;
   padding: 8px 10px;
+  vertical-align: top;
+  white-space: normal;          /* allow wrapping */
+  word-break: break-word;       /* wrap long tokens/URLs */
 }
+.table th { background: #222; position: sticky; top: 0; }
 
-.table th {
-  background: #f9fafb;
-}
+.num { font-size: 12px; }       /* "numbers should keep small" */
+.center { text-align: center; }
+.right { text-align: right; }
 
-/* Summary box */
 .summary-box {
   white-space: pre-wrap;
-  background: #f9fafb;
+  background: #111;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
   font-size: 14px;
+  color: var(--text);
 }
 
 /* Badges */
-.badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-weight: 600;
-  font-size: 12px;
-}
-
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 600; font-size: 12px; }
 .badge.high { background: var(--high-bg); color: var(--high-fg); }
 .badge.medium { background: var(--med-bg); color: var(--med-fg); }
 .badge.low { background: var(--low-bg); color: var(--low-fg); }
-.badge.default { background: #e5e7eb; color: #374151; }
+.badge.default { background: #333; color: var(--text); }
 
 /* Status text */
 .err { color: var(--danger); margin-top: 8px; }
 .ok  { color: var(--success); margin-top: 8px; }
 
+/* Full-screen loading overlay */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(1px);
+}
+.spinner {
+  width: 56px;
+  height: 56px;
+  border: 6px solid #444;
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Footer */
-.footer {
-  margin-top: 24px;
-  color: var(--muted);
+.footer { margin-top: 24px; color: var(--muted); }
+/* Info icon + tooltip */
+.info {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  border-radius: 999px;
+  background: #2a2a2a;
+  color: #cbd5e1;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid #555;
+}
+.info:hover { background: #333; }
+
+/* Use fixed positioning from the component, so avoid position here.
+   Make sure it floats above everything and wraps long content. */
+.info-tip {
+  z-index: 9999;               /* keep above tables/cards */
+  background: #111;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-width: 360px;            /* constrain width */
+  width: max-content;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+
+  /* wrap long content & URLs */
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }

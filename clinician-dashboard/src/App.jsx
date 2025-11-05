@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
 
@@ -40,54 +40,140 @@ function DownloadButton({ filename, mime = 'application/json', getBlob }) {
   )
 }
 
+  function InfoTip({ text }) {
+    const [open, setOpen] = useState(false)
+    const [pos, setPos] = useState({ top: 24, left: 0, transform: '' })
+    const btnRef = useRef(null)
+    const tipRef = useRef(null)
+
+    useEffect(() => {
+      if (!open) return
+      const btn = btnRef.current
+      const tip = tipRef.current
+      if (!btn || !tip) return
+
+      const b = btn.getBoundingClientRect()
+      const t = tip.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+
+      // Default: below, left aligned to button
+      let top = b.bottom + 6
+      let left = b.left
+      let transform = 'translateX(0)'
+
+      // If going off the right edge, align to right side of tooltip
+      if (left + t.width > vw - 8) {
+        left = Math.max(8, b.right - t.width)
+      }
+      // If still off the left edge, center it on the button
+      if (left < 8) {
+        left = Math.max(8, b.left + b.width / 2 - t.width / 2)
+        transform = 'translateX(0)'
+      }
+
+      // If going off the bottom, place it above
+      if (top + t.height > vh - 8) {
+        top = Math.max(8, b.top - t.height - 6)
+      }
+
+      setPos({ top, left, transform })
+    }, [open, text])
+
+    // Close on Escape or on click outside
+    useEffect(() => {
+      if (!open) return
+      const onKey = (e) => e.key === 'Escape' && setOpen(false)
+      const onClick = (e) => {
+        if (btnRef.current?.contains(e.target) || tipRef.current?.contains(e.target)) return
+        setOpen(false)
+      }
+      window.addEventListener('keydown', onKey)
+      window.addEventListener('mousedown', onClick)
+      return () => {
+        window.removeEventListener('keydown', onKey)
+        window.removeEventListener('mousedown', onClick)
+      }
+    }, [open])
+
+    return (
+      <span style={{ position: 'relative', display: 'inline-block' }}>
+        <span
+          ref={btnRef}
+          className="info"
+          title="More info"
+          onClick={() => setOpen(v => !v)}
+        >i</span>
+
+        {open && (
+          <div
+            ref={tipRef}
+            className="info-tip"
+            style={{
+              position: 'fixed',   // detach from potentially clipping parents
+              top: pos.top,
+              left: pos.left,
+              transform: pos.transform,
+            }}
+          >
+            {text}
+          </div>
+        )}
+      </span>
+    )
+  }
+
 export default function App() {
   const [patientId, setPatientId] = useState('P001')
   const [variantFile, setVariantFile] = useState(null)
   const [ehrFile, setEhrFile] = useState(null)
-  const [uploadMsg, setUploadMsg] = useState('')
   const [topN, setTopN] = useState(5)
 
-  const [analysis, setAnalysis] = useState(null) // { patient_id, prioritized: [...], policy_version, ... }
+  const [analysis, setAnalysis] = useState(null)
   const [analysisMeta, setAnalysisMeta] = useState({ requestId: null, durationMs: null })
 
-  const [summary, setSummary] = useState(null)   // { model, summary, generated_at, ... }
+  const [summary, setSummary] = useState(null)
   const [summaryMeta, setSummaryMeta] = useState({ requestId: null, durationMs: null })
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
-
   const generatedAt = useMemo(() => new Date().toISOString(), [summary?.summary])
 
-  async function uploadVariants() {
-    if (!variantFile) return setError('Please choose a VCF/CSV file for variants.')
-    setError(null); setUploadMsg('Uploading variants...')
-    const fd = new FormData()
-    fd.append('file', variantFile)
-    fd.append('patient_id', patientId)
-    const r = await apiFetch('/upload/variants', { method: 'POST', body: fd, isForm: true })
-    if (!r.ok) {
-      const details = r.data?.detail || r.data?.message
-      return setError(`Upload variants failed: ${r.status}${details ? ` — ${JSON.stringify(details)}` : ''}`)
-    }
-    setUploadMsg('Variants uploaded ✓')
-  }
+  async function maybeUploadFiles() {
+    // Upload selected files (if any) before analyze
+    if (!variantFile && !ehrFile) return { ok: true }
 
-  async function uploadEhr() {
-    if (!ehrFile) return setError('Please choose a JSON/CSV file for EHR.')
-    setError(null); setUploadMsg('Uploading EHR...')
-    const fd = new FormData()
-    fd.append('file', ehrFile)
-    fd.append('patient_id', patientId)
-    const r = await apiFetch('/upload/ehr', { method: 'POST', body: fd, isForm: true })
-    if (!r.ok) {
-      const details = r.data?.detail || r.data?.message
-      return setError(`Upload EHR failed: ${r.status}${details ? ` — ${JSON.stringify(details)}` : ''}`)
+    // Variants
+    if (variantFile) {
+      const fd = new FormData()
+      fd.append('file', variantFile)
+      fd.append('patient_id', patientId)
+      const upV = await apiFetch('/upload/variants', { method: 'POST', body: fd, isForm: true })
+      if (!upV.ok) return upV
     }
-    setUploadMsg('EHR uploaded ✓')
+
+    // EHR
+    if (ehrFile) {
+      const fd = new FormData()
+      fd.append('file', ehrFile)
+      fd.append('patient_id', patientId)
+      const upE = await apiFetch('/upload/ehr', { method: 'POST', body: fd, isForm: true })
+      if (!upE.ok) return upE
+    }
+
+    return { ok: true }
   }
 
   async function runAnalyze() {
     setBusy(true); setError(null); setSummary(null)
+    const uploadRes = await maybeUploadFiles()
+    if (!uploadRes.ok) {
+      setBusy(false)
+      const details = uploadRes.data?.detail || uploadRes.data?.message
+      setError(`Upload failed: ${uploadRes.status}${details ? ` — ${JSON.stringify(details)}` : ''}`)
+      return
+    }
+
     const t0 = Date.now()
     const r = await apiFetch('/analyze', { method: 'POST', body: { patient_id: patientId } })
     const t1 = Date.now()
@@ -98,17 +184,12 @@ export default function App() {
       return setError(`Analyze failed: ${r.status}${details ? ` — ${JSON.stringify(details)}` : ''}`)
     }
     setAnalysis(r.data)
-    setAnalysisMeta({
-      requestId: r.requestId,
-      durationMs: r.durMs || (t1 - t0)
-    })
+    setAnalysisMeta({ requestId: r.requestId, durationMs: r.durMs || (t1 - t0) })
   }
 
   async function runSummary() {
     if (!analysis?.prioritized?.length) return setError('No analysis results to summarize.')
-
     const selected = analysis.prioritized.slice(0, Math.max(1, Number(topN) || 5))
-
     const payload = {
       patient_id: patientId,
       variants: selected.map(v => ({
@@ -135,10 +216,7 @@ export default function App() {
     }
 
     setSummary({ ...r.data })
-    setSummaryMeta({
-      requestId: r.requestId,
-      durationMs: r.durMs || (t1 - t0)
-    })
+    setSummaryMeta({ requestId: r.requestId, durationMs: r.durMs || (t1 - t0) })
   }
 
   function exportJSON() {
@@ -195,6 +273,12 @@ export default function App() {
 
   return (
     <div className="page">
+      {busy && (
+        <div className="overlay" aria-busy="true" aria-live="polite">
+          <div className="spinner" />
+        </div>
+      )}
+
       <h1 className="h1">Genomic CDSS — Clinician Dashboard</h1>
 
       {/* Transparency Bar */}
@@ -208,52 +292,50 @@ export default function App() {
         <div><b>generated_at:</b> {summary ? new Date().toISOString() : '—'}</div>
       </div>
 
-      {/* Upload panel */}
+      {/* Upload + Run */}
       <section className="card">
         <h2 className="h2">1) Upload files</h2>
-
-        <div className="row" style={{ marginBottom: 8 }}>
-          <label className="label">Patient ID</label>
-          <input
-            type="text"
-            value={patientId}
-            onChange={(e) => setPatientId(e.target.value)}
-            className="input text"
-            placeholder="e.g., P001"
-          />
-        </div>
-
         <div className="row">
-          <div className="box">
-            <label className="label">Variants (VCF/CSV)</label>
+          <div className="box" style={{ minWidth: 360 }}>
+            <label className="label">Variants (VCF/CSV)
+              &nbsp;<InfoTip text={
+                `VCF/CSV with columns or fields that can be normalized to {variant_id, gene}.
+- VCF: standard fields (CHROM, POS, REF, ALT); gene can be derived if present.
+- CSV: headers variant_id,gene or separate CHROM,POS,REF,ALT.
+Duplicates will be deduplicated by backend.`
+              } />
+            </label>
             <input type="file" accept=".vcf,.csv" onChange={e => setVariantFile(e.target.files?.[0] || null)} />
-            <button onClick={uploadVariants} className="button">Upload variants</button>
           </div>
-          <div className="box">
-            <label className="label">EHR (JSON/CSV)</label>
+
+          <div className="box" style={{ minWidth: 360 }}>
+            <label className="label">EHR (JSON/CSV)
+              &nbsp;<InfoTip text={
+                `Minimal patient EHR with {age, sex, cancer_type, stage}.
+- JSON example: {"age":71,"sex":"M","cancer_type":"CRC","stage":"III"}
+- CSV: headers age,sex,cancer_type,stage
+Fields listed in REDACT_EHR_FIELDS will be redacted from LLM prompts.`
+              } />
+            </label>
             <input type="file" accept=".json,.csv" onChange={e => setEhrFile(e.target.files?.[0] || null)} />
-            <button onClick={uploadEhr} className="button">Upload EHR</button>
           </div>
         </div>
-        {uploadMsg ? <p className="ok">{uploadMsg}</p> : null}
+
+        <div className="row" style={{ marginTop: 12 }}>
+          <button onClick={runAnalyze} disabled={busy} className="button-primary">
+            {busy ? 'Working…' : 'Run analysis'}
+          </button>
+          {error ? <p className="err" style={{ marginLeft: 8 }}>{error}</p> : null}
+        </div>
       </section>
 
-      {/* Analyze */}
+      {/* Results */}
       <section className="card">
-        <h2 className="h2">2) Analyze</h2>
-        <button onClick={runAnalyze} disabled={busy} className="button-primary">
-          {busy ? 'Running...' : 'Run analysis'}
-        </button>
-        {error ? <p className="err">{error}</p> : null}
-      </section>
-
-      {/* Results table */}
-      <section className="card">
-        <h2 className="h2">3) Results</h2>
+        <h2 className="h2">2) Results</h2>
         {analysis?.prioritized?.length ? (
           <>
             <Table results={analysis.prioritized} />
-            <div className="row-between">
+            <div className="row-between" style={{ marginTop: 12 }}>
               <div className="row">
                 <label>Top-N for summary:&nbsp;</label>
                 <input
@@ -264,7 +346,7 @@ export default function App() {
                   onChange={(e) => setTopN(e.target.value)}
                 />
                 <button onClick={runSummary} disabled={busy} className="button-primary">
-                  {busy ? 'Generating...' : 'Generate summary'}
+                  {busy ? 'Generating…' : 'Generate summary'}
                 </button>
               </div>
               <div className="row">
@@ -281,7 +363,7 @@ export default function App() {
 
       {/* Summary */}
       <section className="card">
-        <h2 className="h2">4) Summary</h2>
+        <h2 className="h2">3) Summary</h2>
         {summary?.summary ? (
           <pre className="summary-box">{summary.summary}</pre>
         ) : (
@@ -290,7 +372,7 @@ export default function App() {
       </section>
 
       <footer className="footer">
-        <small>API base: {API_BASE}</small>
+        <small>© 2025 AI-Powered Clinical Decision Support System. All rights reserved.</small>
       </footer>
     </div>
   )
@@ -298,18 +380,18 @@ export default function App() {
 
 function Table({ results }) {
   return (
-    <div style={{ overflowX: 'auto' }}>
+    <div>
       <table className="table">
         <thead>
           <tr>
             <th>Variant</th>
             <th>Gene</th>
-            <th>CADD</th>
+            <th className="right">CADD</th>
             <th>PolyPhen</th>
             <th>SIFT</th>
             <th>ClinVar</th>
-            <th>Priority</th>
-            <th>Score</th>
+            <th className="center">Priority</th>
+            <th className="right">Score</th>
             <th>Knowledge</th>
             <th>Explanation</th>
           </tr>
@@ -327,12 +409,12 @@ function Table({ results }) {
               <tr key={idx}>
                 <td>{v.variant_id || '—'}</td>
                 <td>{v.gene || '—'}</td>
-                <td>{v.cadd ?? '—'}</td>
-                <td>{v.polyphen ?? '—'}</td>
-                <td>{v.sift ?? '—'}</td>
-                <td>{v.clinvar ?? '—'}</td>
-                <td><span className={badgeClass}>{row.priority_label || '—'}</span></td>
-                <td>{row.priority_score != null ? row.priority_score.toFixed(3) : '—'}</td>
+                <td className="right num">{v.cadd ?? '—'}</td>
+                <td className="num">{v.polyphen ?? '—'}</td>
+                <td className="num">{v.sift ?? '—'}</td>
+                <td className="num">{v.clinvar ?? '—'}</td>
+                <td className="center"><span className={badgeClass}>{row.priority_label || '—'}</span></td>
+                <td className="right num">{row.priority_score != null ? row.priority_score.toFixed(3) : '—'}</td>
                 <td>
                   {knowledge.length ? knowledge.map((k, i) => (
                     <div key={i}>
@@ -340,7 +422,7 @@ function Table({ results }) {
                     </div>
                   )) : '—'}
                 </td>
-                <td style={{ maxWidth: 360 }}>{row.rationale || '—'}</td>
+                <td>{row.rationale || '—'}</td>
               </tr>
             )
           })}
