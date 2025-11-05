@@ -106,16 +106,20 @@ export default function App() {
 
   async function runSummary() {
     if (!analysis?.prioritized?.length) return setError('No analysis results to summarize.')
+
     const selected = analysis.prioritized.slice(0, Math.max(1, Number(topN) || 5))
+
     const payload = {
       patient_id: patientId,
       variants: selected.map(v => ({
         variant: v.variant,
         priority_score: v.priority_score,
-        priority_label: v.priority_label
+        priority_label: v.priority_label,
+        rationale: v.rationale || ''
       })),
       ehr: analysis.ehr || null
     }
+
     setBusy(true); setError(null)
     const t0 = Date.now()
     const r = await apiFetch('/llm_summary', { method: 'POST', body: payload })
