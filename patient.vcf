@@ -1,0 +1,4 @@
+##fileformat=VCFv4.2
+#CHROM  POS     ID      REF     ALT     QUAL    FILTER   INFO
+17      7579472 .       C       T       .       .        .
+12      25398284 .      G       A       .       .        .

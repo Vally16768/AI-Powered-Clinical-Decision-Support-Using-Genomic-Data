@@ -1,3 +1,15 @@
-Write a concise, structured paragraph (3–6 sentences) for clinicians.
-Avoid prescriptive therapy. Highlight evidence strength, variant uncertainty (VUS), and the need for validation and multidisciplinary review.
-If applicable, reference gene-level relevance briefly and emphasize limitations of the available data.
+Write ONLY:
+• 3–6 concise bullet points that restate factual findings (gene, variant_id, evidence signals like CADD/PolyPhen/SIFT/ClinVar, and any knowledge URLs if present).
+• OPTIONAL: one neutral recap sentence.
+
+HARD CONSTRAINTS:
+• NO recommendations, actions, or advice (e.g., “discuss”, “consider”, “recommend”, “therapy”, “treatment”, “testing”).
+• NO hedging like “uncertain significance”, “limited evidence”, “may”, “might”, “should”.
+• NO invented data. Neutral, evidentiary tone only.
+• Keep bullets ≤ 25 words each.
+
+Format:
+- Bullet 1
+- Bullet 2
+- Bullet 3
+[Optional one-sentence recap here]

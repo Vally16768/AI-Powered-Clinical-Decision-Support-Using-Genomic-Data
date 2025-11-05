@@ -1,0 +1,3 @@
+gene,disease_area,evidence_note,url
+TP53,Pan-cancer,"Tumor suppressor; frequent LoF variants","https://www.oncokb.org/gene/TP53"
+KRAS,CRC/NSCLC,"Oncogenic driver; codon 12/13 hotspots","https://civicdb.org/genes/KRAS/variants"

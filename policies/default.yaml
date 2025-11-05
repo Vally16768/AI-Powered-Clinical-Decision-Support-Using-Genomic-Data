@@ -1,0 +1,31 @@
+version: "1.0.0"
+
+cadd_max: 40
+
+weights:
+  cadd: 0.45
+  polyphen: 0.25
+  sift: 0.10
+  clinvar: 0.20
+  vus: 0.3
+
+priority_thresholds:
+  high: 0.75
+  medium: 0.40
+
+maps:
+  polyphen:
+    probably_damaging: 1.0
+    possibly_damaging: 0.7
+    benign: 0.0
+  sift:
+    damaging: 1.0
+    tolerated: 0.0
+  clinvar:
+    vus: 0.3
+    pathogenic: 1.0
+    likely_pathogenic: 0.8
+    uncertain_significance: 0.3
+    vus: 0.3
+    likely_benign: 0.1
+    benign: 0.0
