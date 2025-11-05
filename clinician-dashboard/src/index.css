@@ -1,0 +1,39 @@
+/* Base reset & typography */
+:root {
+  --bg: #f8fafc;
+  --card: #ffffff;
+  --border: #e5e7eb;
+  --muted: #6b7280;
+  --text: #111827;
+  --blue: #3b82f6;
+  --blue-border: #2563eb;
+
+  --danger: #b91c1c;
+  --success: #065f46;
+
+  --high-bg: #fee2e2;
+  --high-fg: #c81e1e;
+  --med-bg: #fef3c7;
+  --med-fg: #b45309;
+  --low-bg: #d1fae5;
+  --low-fg: #065f46;
+
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Generic elements */
+a { color: #0a58ca; text-decoration: none; }
+a:hover { text-decoration: underline; }
