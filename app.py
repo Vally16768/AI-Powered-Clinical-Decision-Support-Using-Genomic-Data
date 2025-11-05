@@ -10,7 +10,7 @@ import uuid
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Literal
 
 import pandas as pd
 import requests
@@ -33,9 +33,6 @@ def _as_bool(val: Optional[str], default: bool = False) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 def _parse_candidates(raw: Optional[str]) -> List[str]:
-    """
-    Accepts either a JSON list (["a","b"]) or a comma-separated string ("a,b").
-    """
     if not raw:
         return []
     raw = raw.strip()
@@ -48,9 +45,6 @@ def _parse_candidates(raw: Optional[str]) -> List[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 def _parse_vram_catalog(raw: Optional[str]) -> Dict[str, float]:
-    """
-    Accepts either JSON {"m":8} or "m=8, x=4".
-    """
     if not raw:
         return {}
     raw = raw.strip()
@@ -71,7 +65,6 @@ def _parse_vram_catalog(raw: Optional[str]) -> Dict[str, float]:
     return cat
 
 ENV: Dict[str, Any] = {
-    # accept either VARIANT_SCORES_PATH or legacy SCORES_CSV
     "VARIANT_SCORES_PATH": os.getenv("VARIANT_SCORES_PATH", os.getenv("SCORES_CSV", "./variant_scores.csv")),
     "POLICY_FILE": os.getenv("POLICY_FILE", "./policies/default.yaml"),
     "GENE_KNOWLEDGE_CSV": os.getenv("GENE_KNOWLEDGE_CSV", "./data/gene_knowledge.csv"),
@@ -83,12 +76,10 @@ ENV: Dict[str, Any] = {
 
     "LLM_PROVIDER": os.getenv("LLM_PROVIDER", "OLLAMA"),
     "OLLAMA_HOST": os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"),
-    # support both LLM_CANDIDATES and MODEL_CANDIDATES
     "LLM_CANDIDATES": _parse_candidates(os.getenv("LLM_CANDIDATES") or os.getenv("MODEL_CANDIDATES", "qwen2.5:7b-instruct, qwen2.5:3b-instruct, phi3:mini")),
     "LLM_MIN_VRAM_GB": float(os.getenv("LLM_MIN_VRAM_GB", "6.0")),
     "LLM_TIMEOUT_SECONDS": int(os.getenv("LLM_TIMEOUT_SECONDS", "25")),
     "LLM_TEMPERATURE": float(os.getenv("LLM_TEMPERATURE", "0.2")),
-    # support both JSON and "m=8, x=4"
     "LLM_VRAM_CATALOG": (_parse_vram_catalog(os.getenv("LLM_VRAM_CATALOG")) or _parse_vram_catalog(os.getenv("MODEL_CATALOG")) or {
         "qwen2.5:7b-instruct": 8.0,
         "llama3:8b-instruct": 8.0,
@@ -108,6 +99,18 @@ ENV: Dict[str, Any] = {
     "W_CLINVAR": float(os.getenv("W_CLINVAR", "0.20")),
 
     "REDACT_EHR_FIELDS": [x.strip() for x in os.getenv("REDACT_EHR_FIELDS", "").split(",") if x.strip()],
+
+    # --- NEW: external knowledge connectors (API-only, no cache) ---
+    "ENABLE_VEP": _as_bool(os.getenv("ENABLE_VEP", "true")),
+    "ENABLE_OPENCRAVAT": _as_bool(os.getenv("ENABLE_OPENCRAVAT", "false")),
+    "ENABLE_ONCOKB": _as_bool(os.getenv("ENABLE_ONCOKB", "true")),
+    "ENABLE_CIVIC": _as_bool(os.getenv("ENABLE_CIVIC", "true")),
+    "VEP_REST_BASE": os.getenv("VEP_REST_BASE", "https://rest.ensembl.org/vep/human/region"),
+    "OPENCRAVAT_API_BASE": os.getenv("OPENCRAVAT_API_BASE", ""),  # optional if you have a CRAVAT API
+    "ONCOKB_API_BASE": os.getenv("ONCOKB_API_BASE", "https://www.oncokb.org/api/v1"),
+    "ONCOKB_API_TOKEN": os.getenv("ONCOKB_API_TOKEN", ""),
+    "CIVIC_BASE_URL": os.getenv("CIVIC_BASE_URL", "https://civicdb.org/api/graphql"),
+    "ANNOTATION_TIMEOUT_S": float(os.getenv("ANNOTATION_TIMEOUT_S", "8")),
 }
 
 Path(ENV["AUDIT_DIR"]).mkdir(parents=True, exist_ok=True)
@@ -145,6 +148,7 @@ class VariantInput(BaseModel):
     gene: Optional[str] = None
 
 class VariantEvidence(BaseModel):
+    # internal normalized scores (rule engine)
     cadd_norm: Optional[float] = None
     polyphen_score: Optional[float] = None
     sift_score: Optional[float] = None
@@ -153,8 +157,9 @@ class VariantEvidence(BaseModel):
 
 class VariantExtra(BaseModel):
     warnings: List[str] = []
-    evidence: VariantEvidence = VariantEvidence()
-    knowledge: List[Dict[str, Any]] = []
+    evidence: VariantEvidence = VariantEvidence()              # existing score evidence
+    api_evidence: List[Dict[str, Any]] = []                   # NEW: raw external evidence (VEP/CRAVAT/OncoKB/CIViC)
+    knowledge: List[Dict[str, Any]] = []                      # clinician-facing statements (CSV + OncoKB + CIViC)
     audit: Dict[str, Any] = {}
 
 class VariantDetails(BaseModel):
@@ -203,7 +208,7 @@ class LLMResponse(BaseModel):
 UPLOAD_STORE: Dict[str, Dict[str, Any]] = {}
 
 # ----------------------
-# Annotator
+# Annotator (local CSV scorer, unchanged)
 # ----------------------
 class VariantAnnotator:
     def __init__(self, csv_path: str):
@@ -249,7 +254,7 @@ class VariantAnnotator:
         return base
 
 # ----------------------
-# Policy & Knowledge
+# Policy & Gene-level knowledge (CSV fallback)
 # ----------------------
 POLICY: Dict[str, Any] = {}
 POLICY_VERSION = "0.0.0"
@@ -283,6 +288,7 @@ class KnowledgeBase:
                 "disease_area": None if pd.isna(row.get("disease_area")) else str(row.get("disease_area")),
                 "evidence_note": None if pd.isna(row.get("evidence_note")) else str(row.get("evidence_note")),
                 "url": None if pd.isna(row.get("url")) else str(row.get("url")),
+                "source": "GENE_CSV",
             })
 
     def get(self, gene: Optional[str]) -> List[Dict[str, Any]]:
@@ -293,7 +299,7 @@ class KnowledgeBase:
 KNOWLEDGE: KnowledgeBase
 
 # ----------------------
-# Scoring
+# Scoring (unchanged)
 # ----------------------
 def norm_cadd(x: Optional[float], cadd_max: float) -> Optional[float]:
     if x is None:
@@ -361,6 +367,16 @@ def _score_variant(v: VariantDetails) -> Tuple[float, str, str, VariantEvidence,
     return score, label, rationale, evidence, rules_fired
 
 # ----------------------
+# External connectors (imported)
+# ----------------------
+import asyncio
+import httpx
+from connectors.vep import annotate_vep
+from connectors.opencravat import annotate_opencravat
+from connectors.oncokb import annotate_oncokb
+from connectors.civic import annotate_civic
+
+# ----------------------
 # LLM
 # ----------------------
 SYSTEM_PROMPT = ""
@@ -411,6 +427,15 @@ def build_llm_prompt(ehr: Optional[Dict[str, Any]], pv: List[PrioritizedVariant]
     for item in pv[:10]:
         v = item.variant
         lines.append(f"- {v.gene or 'NA'} {v.variant_id} | priority={item.priority_label} | score={round(item.priority_score,3)} | CADD={v.cadd} | PolyPhen={v.polyphen} | SIFT={v.sift} | ClinVar={v.clinvar}")
+        # Inject top knowledge items (source + level + statement + url)
+        kn = (v.extra.knowledge or [])[:3]
+        if kn:
+            for k in kn:
+                src = k.get("source") or "SRC"
+                lvl = k.get("evidence_level")
+                stmt = k.get("statement") or (k.get("evidence_note") or "")
+                url = k.get("url") or k.get("link") or ""
+                lines.append(f"  • {src}{(' ' + str(lvl)) if lvl else ''}: {stmt}{(' [' + url + ']') if url else ''}")
     lines.append(SUMMARY_INSTRUCTIONS)
     return "\n".join(lines)
 
@@ -419,7 +444,10 @@ def _fallback_summary(patient_id: str, pv: List[PrioritizedVariant], ehr: Option
     bullets = []
     for p in top:
         v = p.variant
-        kb = v.extra.knowledge[0]["url"] if v.extra.knowledge else None
+        kb = None
+        for k in (v.extra.knowledge or []):
+            if k.get("url"):
+                kb = k["url"]; break
         bullets.append(
             f"- {v.gene or 'NA'} {v.variant_id}: {p.priority_label} (score {round(p.priority_score,3)}). "
             f"Evidence: CADD={v.cadd}, PolyPhen={v.polyphen}, SIFT={v.sift}, ClinVar={v.clinvar}" + (f" [ref]({kb})" if kb else "")
@@ -430,7 +458,7 @@ def _fallback_summary(patient_id: str, pv: List[PrioritizedVariant], ehr: Option
 # ----------------------
 # FastAPI + middleware
 # ----------------------
-app = FastAPI(title="Genomic CDSS API", version="1.0.2")
+app = FastAPI(title="Genomic CDSS API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -439,7 +467,6 @@ app.add_middleware(
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # set request_id early so it's available even if handler raises
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
         start = time.perf_counter()
@@ -458,7 +485,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequestContextMiddleware)
 
 # ----------------------
-# Validators & normalizers
+# Validators & normalizers (unchanged)
 # ----------------------
 def normalize_vcf_line(line: str) -> Optional[Dict[str, str]]:
     parts = line.strip().split("\t")
@@ -615,10 +642,55 @@ async def upload_ehr(patient_id: str = Form(...), file: UploadFile = File(None),
     return {"ok": True, "patient_id": patient_id, "ehr_keys": list(ehr.keys())}
 
 # ----------------------
+# External annotation orchestrator (API-only, no cache)
+# ----------------------
+async def annotate_variant_all_external(variant: Dict[str, Any], ehr: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    variant: VariantDetails.dict()
+    Returns: merged extra.api_evidence and extra.knowledge (OncoKB/CIViC) without replacing local scores.
+    """
+    gene = variant.get("gene")
+    disease = (ehr or {}).get("cancer_type")
+    var_id = variant["variant_id"]
+
+    api_evidence: List[Dict[str, Any]] = []
+    ext_knowledge: List[Dict[str, Any]] = []
+
+    async with httpx.AsyncClient() as session:
+        tasks = []
+        # VEP
+        if ENV["ENABLE_VEP"]:
+            tasks.append(annotate_vep(session, var_id))
+        else:
+            tasks.append(asyncio.sleep(0, result=[]))
+        # OpenCRAVAT (optional API)
+        if ENV["ENABLE_OPENCRAVAT"]:
+            tasks.append(annotate_opencravat(session, var_id))
+        else:
+            tasks.append(asyncio.sleep(0, result=[]))
+        # OncoKB
+        if ENV["ENABLE_ONCOKB"] and gene:
+            tasks.append(annotate_oncokb(session, var_id, gene, disease))
+        else:
+            tasks.append(asyncio.sleep(0, result=([], [])))
+        # CIViC
+        if ENV["ENABLE_CIVIC"] and gene:
+            tasks.append(annotate_civic(session, gene, variant_label=var_id))
+        else:
+            tasks.append(asyncio.sleep(0, result=([], [])))
+
+        vep_ev, cravat_ev, (onc_ev, onc_kn), (civ_ev, civ_kn) = await asyncio.gather(*tasks)
+
+    api_evidence.extend(vep_ev); api_evidence.extend(cravat_ev); api_evidence.extend(onc_ev); api_evidence.extend(civ_ev)
+    ext_knowledge.extend(onc_kn); ext_knowledge.extend(civ_kn)
+
+    return {"api_evidence": api_evidence, "knowledge": ext_knowledge}
+
+# ----------------------
 # Analyze
 # ----------------------
 @app.post("/analyze", response_model=AnalyzeResponse)
-def analyze(req: AnalyzeRequest, request: Request):
+async def analyze(req: AnalyzeRequest, request: Request):
     _start = time.perf_counter()
     patient_id = req.patient_id
     stored = UPLOAD_STORE.get(patient_id, {})
@@ -636,10 +708,12 @@ def analyze(req: AnalyzeRequest, request: Request):
         payload["duration_ms"] = getattr(request.state, "duration_ms", 0)
         return JSONResponse(status_code=bad.status_code, content=payload)
 
+    # local score annotation
     annotated: List[VariantDetails] = [ANNOTATOR.annotate(v) for v in variants_in]
     prioritized: List[PrioritizedVariant] = []
     for v in annotated:
-        v.extra.knowledge = KNOWLEDGE.get(v.gene)
+        # Start knowledge with gene-level CSV fallback (if any)
+        v.extra.knowledge = (KNOWLEDGE.get(v.gene) or [])
         score, label, rationale, evidence, rules = _score_variant(v)
         v.extra.evidence = evidence
         v.extra.audit.update({"scored_at": datetime.now(timezone.utc).isoformat(), "policy_version": POLICY_VERSION})
@@ -651,6 +725,32 @@ def analyze(req: AnalyzeRequest, request: Request):
         ))
     prioritized.sort(key=lambda x: x.priority_score, reverse=True)
 
+    # --- NEW: live external evidence/knowledge (API-only) ---
+    ehr_dict = ehr_in or {}
+    # Execute calls in parallel for all prioritized variants
+    externals = await asyncio.gather(*[
+        annotate_variant_all_external(item.variant.dict(), ehr_dict) for item in prioritized
+    ])
+    for item, ext in zip(prioritized, externals):
+        # append external evidence
+        item.variant.extra.api_evidence = (item.variant.extra.api_evidence or []) + (ext.get("api_evidence") or [])
+        # merge knowledge: OncoKB/CIViC statements first, keep CSV after
+        ext_kn = ext.get("knowledge") or []
+        if ext_kn:
+            # put external knowledge ahead of CSV entries
+            item.variant.extra.knowledge = ext_kn + (item.variant.extra.knowledge or [])
+
+        # audit mark
+        item.variant.extra.audit["external_enrichment"] = {
+            "sources": {
+                "VEP": ENV["ENABLE_VEP"],
+                "OpenCRAVAT": ENV["ENABLE_OPENCRAVAT"],
+                "OncoKB": ENV["ENABLE_ONCOKB"],
+                "CIViC": ENV["ENABLE_CIVIC"],
+            },
+            "completed_at": datetime.now(timezone.utc).isoformat()
+        }
+
     _duration_ms = int((time.perf_counter() - _start) * 1000)
 
     if ENV["AUDIT_ENABLED"]:
@@ -660,7 +760,15 @@ def analyze(req: AnalyzeRequest, request: Request):
             "endpoint": "/analyze",
             "input": {"patient_id": patient_id, "variants_count": len(variants_in)},
             "policy_version": POLICY_VERSION,
-            "config": {"policy_file": ENV["POLICY_FILE"]},
+            "config": {
+                "policy_file": ENV["POLICY_FILE"],
+                "external": {
+                    "vep": ENV["ENABLE_VEP"],
+                    "opencravat": ENV["ENABLE_OPENCRAVAT"],
+                    "oncokb": ENV["ENABLE_ONCOKB"],
+                    "civic": ENV["ENABLE_CIVIC"],
+                }
+            },
             "result": [{"vid": p.variant.variant_id, "score": p.priority_score, "label": p.priority_label} for p in prioritized],
             "duration_ms": _duration_ms,
         }
@@ -677,7 +785,7 @@ def analyze(req: AnalyzeRequest, request: Request):
     )
 
 # ----------------------
-# LLM summary
+# LLM summary (injects knowledge)
 # ----------------------
 @app.post("/llm_summary", response_model=LLMResponse)
 def llm_summary(req: LLMRequest, request: Request):
@@ -728,7 +836,7 @@ def llm_summary(req: LLMRequest, request: Request):
     )
 
 # ----------------------
-# Health & config
+# Health & config (minor bump)
 # ----------------------
 @app.get("/health/all")
 def health_all():
@@ -743,7 +851,13 @@ def health_all():
         "knowledge_file": {"path": ENV["GENE_KNOWLEDGE_CSV"], "exists": exists_knowledge},
         "audit": {"path": ENV["AUDIT_DIR"], "writable": audit_writable, "enabled": ENV["AUDIT_ENABLED"]},
         "llm": {"provider": ENV["LLM_PROVIDER"], "selected_model": choose_llm_model(ENV["LLM_CANDIDATES"], ENV["LLM_MIN_VRAM_GB"], ENV["LLM_VRAM_CATALOG"])},
-        "service": {"name": "Genomic CDSS API", "version": "1.0.2"},
+        "external": {
+            "VEP": ENV["ENABLE_VEP"],
+            "OpenCRAVAT": ENV["ENABLE_OPENCRAVAT"],
+            "OncoKB": ENV["ENABLE_ONCOKB"],
+            "CIViC": ENV["ENABLE_CIVIC"],
+        },
+        "service": {"name": "Genomic CDSS API", "version": "1.1.0"},
     }
 
 @app.get("/config")
@@ -766,9 +880,20 @@ def get_config():
             "temperature": ENV["LLM_TEMPERATURE"],
             "vram_catalog": ENV["LLM_VRAM_CATALOG"],
         },
+        "external": {
+            "ENABLE_VEP": ENV["ENABLE_VEP"],
+            "ENABLE_OPENCRAVAT": ENV["ENABLE_OPENCRAVAT"],
+            "ENABLE_ONCOKB": ENV["ENABLE_ONCOKB"],
+            "ENABLE_CIVIC": ENV["ENABLE_CIVIC"],
+            "VEP_REST_BASE": ENV["VEP_REST_BASE"],
+            "OPENCRAVAT_API_BASE": ENV["OPENCRAVAT_API_BASE"],
+            "ONCOKB_API_BASE": ENV["ONCOKB_API_BASE"],
+            "CIVIC_BASE_URL": ENV["CIVIC_BASE_URL"],
+            "ANNOTATION_TIMEOUT_S": ENV["ANNOTATION_TIMEOUT_S"],
+        },
         "policy_version": POLICY_VERSION,
     }
 
 @app.get("/")
 def root():
-    return {"ok": True, "name": "Genomic CDSS API", "version": "1.0.2", "policy_version": POLICY_VERSION}
+    return {"ok": True, "name": "Genomic CDSS API", "version": "1.1.0", "policy_version": POLICY_VERSION}

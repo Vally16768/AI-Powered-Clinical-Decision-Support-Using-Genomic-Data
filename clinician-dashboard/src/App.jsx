@@ -40,88 +40,82 @@ function DownloadButton({ filename, mime = 'application/json', getBlob }) {
   )
 }
 
-  function InfoTip({ text }) {
-    const [open, setOpen] = useState(false)
-    const [pos, setPos] = useState({ top: 24, left: 0, transform: '' })
-    const btnRef = useRef(null)
-    const tipRef = useRef(null)
+function InfoTip({ text }) {
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState({ top: 24, left: 0, transform: '' })
+  const btnRef = useRef(null)
+  const tipRef = useRef(null)
 
-    useEffect(() => {
-      if (!open) return
-      const btn = btnRef.current
-      const tip = tipRef.current
-      if (!btn || !tip) return
+  useEffect(() => {
+    if (!open) return
+    const btn = btnRef.current
+    const tip = tipRef.current
+    if (!btn || !tip) return
 
-      const b = btn.getBoundingClientRect()
-      const t = tip.getBoundingClientRect()
-      const vw = window.innerWidth
-      const vh = window.innerHeight
+    const b = btn.getBoundingClientRect()
+    const t = tip.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
 
-      // Default: below, left aligned to button
-      let top = b.bottom + 6
-      let left = b.left
-      let transform = 'translateX(0)'
+    let top = b.bottom + 6
+    let left = b.left
+    let transform = 'translateX(0)'
 
-      // If going off the right edge, align to right side of tooltip
-      if (left + t.width > vw - 8) {
-        left = Math.max(8, b.right - t.width)
-      }
-      // If still off the left edge, center it on the button
-      if (left < 8) {
-        left = Math.max(8, b.left + b.width / 2 - t.width / 2)
-        transform = 'translateX(0)'
-      }
+    if (left + t.width > vw - 8) {
+      left = Math.max(8, b.right - t.width)
+    }
+    if (left < 8) {
+      left = Math.max(8, b.left + b.width / 2 - t.width / 2)
+      transform = 'translateX(0)'
+    }
+    if (top + t.height > vh - 8) {
+      top = Math.max(8, b.top - t.height - 6)
+    }
 
-      // If going off the bottom, place it above
-      if (top + t.height > vh - 8) {
-        top = Math.max(8, b.top - t.height - 6)
-      }
+    setPos({ top, left, transform })
+  }, [open, text])
 
-      setPos({ top, left, transform })
-    }, [open, text])
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e) => e.key === 'Escape' && setOpen(false)
+    const onClick = (e) => {
+      if (btnRef.current?.contains(e.target) || tipRef.current?.contains(e.target)) return
+      setOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onClick)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mousedown', onClick)
+    }
+  }, [open])
 
-    // Close on Escape or on click outside
-    useEffect(() => {
-      if (!open) return
-      const onKey = (e) => e.key === 'Escape' && setOpen(false)
-      const onClick = (e) => {
-        if (btnRef.current?.contains(e.target) || tipRef.current?.contains(e.target)) return
-        setOpen(false)
-      }
-      window.addEventListener('keydown', onKey)
-      window.addEventListener('mousedown', onClick)
-      return () => {
-        window.removeEventListener('keydown', onKey)
-        window.removeEventListener('mousedown', onClick)
-      }
-    }, [open])
+  return (
+    <span style={{ position: 'relative', display: 'inline-block' }}>
+      <span
+        ref={btnRef}
+        className="info"
+        title="More info"
+        onClick={() => setOpen(v => !v)}
+      >i</span>
 
-    return (
-      <span style={{ position: 'relative', display: 'inline-block' }}>
-        <span
-          ref={btnRef}
-          className="info"
-          title="More info"
-          onClick={() => setOpen(v => !v)}
-        >i</span>
-
-        {open && (
-          <div
-            ref={tipRef}
-            className="info-tip"
-            style={{
-              position: 'fixed',   // detach from potentially clipping parents
-              top: pos.top,
-              left: pos.left,
-              transform: pos.transform,
-            }}
-          >
-            {text}
-          </div>
-        )}
-      </span>
-    )
-  }
+      {open && (
+        <div
+          ref={tipRef}
+          className="info-tip"
+          style={{
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            transform: pos.transform,
+          }}
+        >
+          {text}
+        </div>
+      )}
+    </span>
+  )
+}
 
 export default function App() {
   const [patientId, setPatientId] = useState('P001')
@@ -137,13 +131,9 @@ export default function App() {
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
-  const generatedAt = useMemo(() => new Date().toISOString(), [summary?.summary])
 
   async function maybeUploadFiles() {
-    // Upload selected files (if any) before analyze
     if (!variantFile && !ehrFile) return { ok: true }
-
-    // Variants
     if (variantFile) {
       const fd = new FormData()
       fd.append('file', variantFile)
@@ -151,8 +141,6 @@ export default function App() {
       const upV = await apiFetch('/upload/variants', { method: 'POST', body: fd, isForm: true })
       if (!upV.ok) return upV
     }
-
-    // EHR
     if (ehrFile) {
       const fd = new FormData()
       fd.append('file', ehrFile)
@@ -160,7 +148,6 @@ export default function App() {
       const upE = await apiFetch('/upload/ehr', { method: 'POST', body: fd, isForm: true })
       if (!upE.ok) return upE
     }
-
     return { ok: true }
   }
 
@@ -191,7 +178,7 @@ export default function App() {
     if (!analysis?.prioritized?.length) return setError('No analysis results to summarize.')
     const selected = analysis.prioritized.slice(0, Math.max(1, Number(topN) || 5))
     const payload = {
-      patient_id: patientId,
+      patient_id: analysis.patient_id,
       variants: selected.map(v => ({
         variant: v.variant,
         priority_score: v.priority_score,
@@ -281,7 +268,6 @@ export default function App() {
 
       <h1 className="h1">Genomic CDSS — Clinician Dashboard</h1>
 
-      {/* Transparency Bar */}
       <div className="transparency">
         <div><b>Model LLM:</b> {summary?.model || '—'}</div>
         <div><b>Policy version:</b> {analysis?.policy_version || '—'}</div>
@@ -292,7 +278,6 @@ export default function App() {
         <div><b>generated_at:</b> {summary ? new Date().toISOString() : '—'}</div>
       </div>
 
-      {/* Upload + Run */}
       <section className="card">
         <h2 className="h2">1) Upload files</h2>
         <div className="row">
@@ -300,9 +285,9 @@ export default function App() {
             <label className="label">Variants (VCF/CSV)
               &nbsp;<InfoTip text={
                 `VCF/CSV with columns or fields that can be normalized to {variant_id, gene}.
-- VCF: standard fields (CHROM, POS, REF, ALT); gene can be derived if present.
-- CSV: headers variant_id,gene or separate CHROM,POS,REF,ALT.
-Duplicates will be deduplicated by backend.`
+- VCF: CHROM,POS,REF,ALT (gene can be derived).
+- CSV: variant_id,gene or CHROM,POS,REF,ALT.
+Backend deduplicates rows and requires gene present.`
               } />
             </label>
             <input type="file" accept=".vcf,.csv" onChange={e => setVariantFile(e.target.files?.[0] || null)} />
@@ -312,9 +297,8 @@ Duplicates will be deduplicated by backend.`
             <label className="label">EHR (JSON/CSV)
               &nbsp;<InfoTip text={
                 `Minimal patient EHR with {age, sex, cancer_type, stage}.
-- JSON example: {"age":71,"sex":"M","cancer_type":"CRC","stage":"III"}
-- CSV: headers age,sex,cancer_type,stage
-Fields listed in REDACT_EHR_FIELDS will be redacted from LLM prompts.`
+JSON example: {"age":71,"sex":"M","cancer_type":"CRC","stage":"III"}
+Fields listed in REDACT_EHR_FIELDS are redacted from LLM prompts.`
               } />
             </label>
             <input type="file" accept=".json,.csv" onChange={e => setEhrFile(e.target.files?.[0] || null)} />
@@ -329,7 +313,6 @@ Fields listed in REDACT_EHR_FIELDS will be redacted from LLM prompts.`
         </div>
       </section>
 
-      {/* Results */}
       <section className="card">
         <h2 className="h2">2) Results</h2>
         {analysis?.prioritized?.length ? (
@@ -361,7 +344,6 @@ Fields listed in REDACT_EHR_FIELDS will be redacted from LLM prompts.`
         )}
       </section>
 
-      {/* Summary */}
       <section className="card">
         <h2 className="h2">3) AI overview</h2>
         {summary?.summary ? (
@@ -392,7 +374,7 @@ function Table({ results }) {
             <th>ClinVar</th>
             <th className="center">Priority</th>
             <th className="right">Score</th>
-            <th>Knowledge</th>
+            <th>Knowledge (OncoKB/CIViC)</th>
             <th>Explanation</th>
           </tr>
         </thead>
@@ -416,9 +398,13 @@ function Table({ results }) {
                 <td className="center"><span className={badgeClass}>{row.priority_label || '—'}</span></td>
                 <td className="right num">{row.priority_score != null ? row.priority_score.toFixed(3) : '—'}</td>
                 <td>
-                  {knowledge.length ? knowledge.map((k, i) => (
-                    <div key={i}>
-                      {k.url ? <a href={k.url} target="_blank" rel="noreferrer">{k.url}</a> : (k.link || '—')}
+                  {knowledge.length ? knowledge.slice(0,3).map((k, i) => (
+                    <div key={i} style={{ marginBottom: 6 }}>
+                      <span className="badge default">{k.source || 'SRC'}{k.evidence_level ? ` • ${k.evidence_level}` : ''}</span>
+                      {k.url ? <a className="ml-2 underline" href={k.url} target="_blank" rel="noreferrer" style={{ marginLeft: 8 }}>link</a> : null}
+                      <div className="text-xs" style={{ opacity: 0.8, marginTop: 2 }}>
+                        {k.statement || k.evidence_note || k.url || '—'}
+                      </div>
                     </div>
                   )) : '—'}
                 </td>

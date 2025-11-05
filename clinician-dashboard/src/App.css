@@ -176,3 +176,5 @@
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+
+.ml-2 { margin-left: 8px; }
