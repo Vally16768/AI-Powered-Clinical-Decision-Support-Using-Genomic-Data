@@ -1,15 +1,32 @@
-Write ONLY:
-• 3–6 concise bullet points that restate factual findings (gene, variant_id, evidence signals like CADD/PolyPhen/SIFT/ClinVar, and any knowledge URLs if present).
-• OPTIONAL: one neutral recap sentence.
+Produce an **argumented diagnostic assessment** with the sections below, in order.
+Keep the total between **8–14 bullets**. Each bullet ≤ 25 words when possible.
 
-HARD CONSTRAINTS:
-• NO recommendations, actions, or advice (e.g., “discuss”, “consider”, “recommend”, “therapy”, “treatment”, “testing”).
-• NO hedging like “uncertain significance”, “limited evidence”, “may”, “might”, “should”.
-• NO invented data. Neutral, evidentiary tone only.
-• Keep bullets ≤ 25 words each.
+1) **Patient Snapshot (from EHR)**
+   - One short line with available fields (e.g., age, sex, cancer_type, stage). If none: “EHR context not provided.”
 
-Format:
-- Bullet 1
-- Bullet 2
-- Bullet 3
-[Optional one-sentence recap here]
+2) **Key Genomic Evidence**
+   - 2–5 bullets: most relevant variants (gene + variant_id) and why they matter diagnostically.
+   - Mention ClinVar label and use scores only if needed for justification.
+   - If a knowledge URL is provided, include it once near the related claim.
+
+3) **Diagnostic Hypotheses (Ranked)**
+   - 1–3 bullets. For each hypothesis:
+     • Give a clear hypothesis of **molecular diagnostic relevance** (NOT a named disease/syndrome unless explicitly present in the input).
+     • Assign a likelihood label (High/Moderate/Low/Indeterminate).
+     • Justify by citing the exact supporting variants (gene + variant_id, ClinVar label, priority/score) and at most one knowledge URL.
+
+4) **Uncertainties & Alternatives**
+   - 1–2 bullets: conflicting/insufficient evidence (e.g., VUS, benign signals) and what this means for diagnostic confidence.
+
+5) **Next Diagnostic Steps (confirmatory only)**
+   - 1–3 bullets: bounded, evidence-linked **confirmatory diagnostic actions/tests** (e.g., orthogonal assay, classification criteria), strictly within the provided information.
+   - No treatment/management advice.
+
+6) **Limitations**
+   - One bullet about data/model limitations (e.g., restricted evidence, unknown somatic vs. germline).
+
+HARD CONSTRAINTS
+- Use ONLY the input evidence and the provided knowledge URLs.
+- Do NOT name or imply diseases/syndromes unless they appear in the EHR/knowledge.
+- No treatment or prognostic recommendations.
+- Keep concise and specific; avoid generic textbook prose.

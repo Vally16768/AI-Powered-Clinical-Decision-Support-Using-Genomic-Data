@@ -346,7 +346,7 @@ Fields listed in REDACT_EHR_FIELDS will be redacted from LLM prompts.`
                   onChange={(e) => setTopN(e.target.value)}
                 />
                 <button onClick={runSummary} disabled={busy} className="button-primary">
-                  {busy ? 'Generating…' : 'Generate summary'}
+                  {busy ? 'Generating…' : 'Generate AI overview'}
                 </button>
               </div>
               <div className="row">
@@ -363,7 +363,7 @@ Fields listed in REDACT_EHR_FIELDS will be redacted from LLM prompts.`
 
       {/* Summary */}
       <section className="card">
-        <h2 className="h2">3) Summary</h2>
+        <h2 className="h2">3) AI overview</h2>
         {summary?.summary ? (
           <pre className="summary-box">{summary.summary}</pre>
         ) : (
