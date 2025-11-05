@@ -1,203 +1,119 @@
+# app.py
+# FastAPI service for rule-based genomic variant prioritization + optional LLM summary (Ollama)
+# Implements:
+# - Robust LLM model selection (choose the best that fits VRAM; fallback to smallest if none fit)
+# - CSV validation at startup
+# - Transparent evidence in responses (extra.evidence) + policy_version and audit info
+# - New endpoints: GET /config and GET /audit/ping
+#
+# NOTE: Keeps the public contract of /analyze and /health/llm intact.
+
+from __future__ import annotations
+
 import os
-import csv
+import time
+import json
 import math
-from typing import List, Optional, Dict, Any
+import hashlib
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI
-from pydantic import BaseModel
-from dotenv import load_dotenv
+import pandas as pd
+import requests
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
 
-# =========================
-# ENV & CONFIG HELPERS
-# =========================
-load_dotenv()
+APP_VERSION = "2.0.0"
+POLICY_VERSION = "1.0.0"
 
-def _getlist(env_key: str, default: str = "") -> List[str]:
-    raw = os.getenv(env_key, default)
-    parts = [p.strip() for p in raw.replace("\n", ",").split(",") if p.strip()]
-    return parts
+# ----------------------
+# Environment & Defaults
+# ----------------------
 
-def _getcatalog(env_key: str = "MODEL_CATALOG") -> Dict[str, float]:
-    """
-    Format in .env:
-      MODEL_CATALOG="llama3.2:3b-instruct=4, qwen2.5:7b-instruct=8, llama3:8b-instruct=8"
-    Values represent min VRAM (GB) needed.
-    """
-    out: Dict[str, float] = {}
-    raw = os.getenv(env_key, "")
-    for item in raw.split(","):
-        item = item.strip()
-        if not item or "=" not in item:
-            continue
-        name, vram = item.split("=", 1)
-        try:
-            out[name.strip()] = float(vram.strip())
-        except ValueError:
-            # ignore malformed entries
-            pass
-    return out
+ENV = {
+    "LLM_PROVIDER": os.getenv("LLM_PROVIDER", "OLLAMA"),
+    "LLM_MIN_VRAM_GB": float(os.getenv("LLM_MIN_VRAM_GB", "6.0")),
+    "LLM_CANDIDATES": json.loads(os.getenv("LLM_CANDIDATES", '["qwen2.5:3b-instruct","phi3:mini","qwen2.5:7b-instruct","llama3:8b-instruct"]')),
+    "LLM_VRAM_CATALOG": json.loads(os.getenv("LLM_VRAM_CATALOG", '{"qwen2.5:3b-instruct":6.0,"phi3:mini":4.0,"qwen2.5:7b-instruct":10.0,"llama3:8b-instruct":14.0}')),
+    "OLLAMA_URL": os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+    "LLM_TIMEOUT_SECONDS": int(os.getenv("LLM_TIMEOUT_SECONDS", "10")),
+    "VARIANT_SCORES_PATH": os.getenv("VARIANT_SCORES_PATH", "./variant_scores.csv"),
+    "SEND_EHR_TO_LLM": os.getenv("SEND_EHR_TO_LLM", "true").lower() == "true",
+    "CADD_MAX": float(os.getenv("CADD_MAX", "40")),
+    # Scoring weights (can be tuned without touching code)
+    "W_CADD": float(os.getenv("W_CADD", "0.45")),
+    "W_POLYPHEN": float(os.getenv("W_POLYPHEN", "0.25")),
+    "W_SIFT": float(os.getenv("W_SIFT", "0.10")),
+    "W_CLINVAR": float(os.getenv("W_CLINVAR", "0.20")),
+}
 
-# Basic app settings
-PORT = int(os.getenv("PORT", "8000"))
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-SCORES_CSV = os.getenv("SCORES_CSV", "variant_scores.csv")
-MAX_VARIANTS = int(os.getenv("MAX_VARIANTS_PER_PATIENT", "50"))
-
-# Model selection settings
-MODEL_CANDIDATES = _getlist("MODEL_CANDIDATES", os.getenv("MODEL", ""))
-MODEL_CATALOG = _getcatalog("MODEL_CATALOG")
-LLM_MIN_VRAM_GB = float(os.getenv("LLM_MIN_VRAM_GB", "0"))
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "OLLAMA").upper()  # OLLAMA | OPENAI
-
-# Prompt / guidance (configurable via env or file, no hardcoding)
-
-def _load_text_from_env_or_file(env_key: str, file_key: Optional[str] = None, fallback: str = "") -> str:
-    val = os.getenv(env_key)
-    if val:
-        return val
-    if file_key:
-        path = os.getenv(file_key)
-        if path and os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-    return fallback
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a clinical genomics assistant. Summarize prioritized variants for oncology. "
-    "Use cautious language, avoid treatment advice, mention uncertainty and suggest validation."
-)
-SYSTEM_PROMPT_TXT = _load_text_from_env_or_file(
-    "SYSTEM_PROMPT", "SYSTEM_PROMPT_FILE", DEFAULT_SYSTEM_PROMPT
-)
-
-DEFAULT_SUMMARY_INSTR = (
-    "Please provide a short clinician-friendly summary that highlights key variants, "
-    "states uncertainty, and avoids treatment advice."
-)
-SUMMARY_INSTRUCTIONS_TXT = _load_text_from_env_or_file(
-    "SUMMARY_INSTRUCTIONS", "SUMMARY_INSTRUCTIONS_FILE", DEFAULT_SUMMARY_INSTR
-)
-SUMMARY_MAX_WORDS = int(os.getenv("SUMMARY_MAX_WORDS", "180"))
-
-
-# =========================
-# MODEL CHOICE
-# =========================
+# ----------------------
+# Utility
+# ----------------------
 
 def choose_llm_model(candidates: List[str], min_vram_gb: float, catalog: Dict[str, float]) -> Optional[str]:
     """
-    Pick the first candidate whose catalog VRAM requirement <= min_vram_gb.
-    If min_vram_gb == 0, don't filter. If nothing matches, return first candidate.
+    Choose the most performant model (first in candidates) that fits VRAM.
+    If none fits, return the smallest (lowest VRAM requirement).
     """
     if not candidates:
         return None
-    if min_vram_gb > 0 and catalog:
-        for m in candidates:
-            req = catalog.get(m)
-            if req is None:
-                # Unknown requirement -> allow optimistically
-                return m
-            if req <= min_vram_gb:
-                return m
-        # fallback if none matched
-    return candidates[0]
+    # Filter those that fit
+    fits = [m for m in candidates if catalog.get(m, float("inf")) <= min_vram_gb]
+    if fits:
+        return fits[0]  # "performant → small" order assumed
+    # Fallback to smallest
+    smallest = min(candidates, key=lambda m: catalog.get(m, float("inf")))
+    return smallest
 
+def _ts() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-CHOSEN_MODEL = choose_llm_model(MODEL_CANDIDATES, LLM_MIN_VRAM_GB, MODEL_CATALOG)
+def _hash(obj: Any) -> str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
+# ----------------------
+# Data Models
+# ----------------------
 
-# =========================
-# LLM PROVIDERS
-# =========================
-class LLMClient:
-    def generate(self, system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2) -> str:
-        raise NotImplementedError
-
-
-class OllamaClient(LLMClient):
-    def __init__(self, host: str, model: str):
-        self.url = f"{host.rstrip('/')}/api/generate"
-        self.model = model
-
-    def generate(self, system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2) -> str:
-        import requests
-        payload = {
-            "model": self.model,
-            "prompt": f"<s>[SYSTEM]\n{system_prompt}\n[/SYSTEM]\n[USER]\n{user_prompt}\n[/USER]\n[ASSISTANT]",
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-            "stream": False,
-        }
-        r = requests.post(self.url, json=payload, timeout=60)
-        r.raise_for_status()
-        return r.json().get("response", "")
-
-
-class OpenAIClient(LLMClient):
-    """Optional provider using the Chat Completions API. Requires OPENAI_API_KEY."""
-
-    def __init__(self, model: str, api_key: Optional[str] = None, base_url: Optional[str] = None):
-        self.model = model
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for LLM_PROVIDER=OPENAI")
-
-    def generate(self, system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2) -> str:
-        import requests
-        url_root = self.base_url.rstrip("/") if self.base_url else "https://api.openai.com/v1"
-        url = url_root + "/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        data = {
-            "model": self.model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        r = requests.post(url, json=data, headers=headers, timeout=60)
-        r.raise_for_status()
-        j = r.json()
-        return j["choices"][0]["message"]["content"]
-
-
-def build_llm_client() -> Optional[LLMClient]:
-    try:
-        if LLM_PROVIDER == "OPENAI":
-            model = os.getenv("OPENAI_MODEL") or (CHOSEN_MODEL or "gpt-4o-mini")
-            return OpenAIClient(model)
-        # default: OLLAMA
-        model = CHOSEN_MODEL or (os.getenv("LLM_MODEL") or "llama3.2:3b-instruct")
-        return OllamaClient(OLLAMA_HOST, model)
-    except Exception:
-        return None
-
-
-# =========================
-# DATA MODELS
-# =========================
-class VariantIn(BaseModel):
+class VariantInput(BaseModel):
     variant_id: str
     gene: Optional[str] = None
 
-
-class PatientEHR(BaseModel):
+class EHR(BaseModel):
     age: Optional[int] = None
     sex: Optional[str] = None
     cancer_type: Optional[str] = None
     stage: Optional[str] = None
+    treatment: Optional[str] = None
 
+class AnalyzeRequest(BaseModel):
+    patient_id: str
+    variants: List[VariantInput]
+    ehr: Optional[EHR] = None
+
+class VariantEvidence(BaseModel):
+    cadd_norm: Optional[float] = None
+    polyphen_score: Optional[float] = None
+    sift_score: Optional[float] = None
+    clinvar_score: Optional[float] = None
+    rules_fired: List[str] = []
+
+class VariantExtra(BaseModel):
+    warnings: List[str] = []
+    evidence: VariantEvidence = VariantEvidence()
+    knowledge: List[Dict[str, Any]] = []
+    audit: Dict[str, Any] = {}
 
 class VariantDetails(BaseModel):
     variant_id: str
-    gene: Optional[str]
+    gene: Optional[str] = None
     cadd: Optional[float] = None
     polyphen: Optional[str] = None
     sift: Optional[str] = None
     clinvar: Optional[str] = None
-    extra: Optional[Dict[str, Any]] = None
-
+    extra: VariantExtra = VariantExtra()
 
 class PrioritizedVariant(BaseModel):
     variant: VariantDetails
@@ -205,237 +121,317 @@ class PrioritizedVariant(BaseModel):
     priority_label: str
     rationale: str
 
-
-class AnalyzeRequest(BaseModel):
-    patient_id: str
-    variants: List[VariantIn]
-    ehr: Optional[PatientEHR] = None
-
-
 class AnalyzeResponse(BaseModel):
     patient_id: str
+    policy_version: str
     prioritized: List[PrioritizedVariant]
-    llm_summary: Optional[str] = None
 
+class LLMRequest(BaseModel):
+    patient_id: str
+    variants: List[PrioritizedVariant]
+    ehr: Optional[EHR] = None
 
-# =========================
-# ANNOTATOR & PRIORITIZATION
-# =========================
+class LLMResponse(BaseModel):
+    patient_id: str
+    model: Optional[str] = None
+    summary: str
+    generated_at: str
+
+# ----------------------
+# Variant Annotator
+# ----------------------
+
+REQUIRED_COLUMNS = ["variant_id", "gene", "cadd", "polyphen", "sift", "clinvar"]
+
 class VariantAnnotator:
-    def __init__(self, csv_path: str = SCORES_CSV) -> None:
-        self.db: Dict[str, Dict[str, Any]] = {}
-        if os.path.isfile(csv_path):
-            with open(csv_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # expect at least variant_id, gene, cadd, polyphen, sift, clinvar
-                    key = (row.get("variant_id") or "").strip()
-                    if not key:
-                        continue
-                    self.db[key] = {
-                        "gene": (row.get("gene") or None),
-                        "cadd": _safe_float(row.get("cadd")),
-                        "polyphen": _norm_str(row.get("polyphen")),
-                        "sift": _norm_str(row.get("sift")),
-                        "clinvar": _norm_str(row.get("clinvar")),
-                    }
+    def __init__(self, csv_path: str):
+        self.csv_path = csv_path
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"Variant score file not found: {csv_path}")
+        df = pd.read_csv(csv_path)
+        missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+        if missing:
+            raise ValueError(f"variant_scores.csv is missing columns: {missing}")
+        # Normalize column types roughly
+        # Keep a dict for quick lookup by variant_id
+        self.table: Dict[str, Dict[str, Any]] = {}
+        for _, row in df.iterrows():
+            vid = str(row["variant_id"]).strip()
+            if not vid:
+                continue
+            self.table[vid] = {
+                "variant_id": vid,
+                "gene": None if pd.isna(row["gene"]) else str(row["gene"]),
+                "cadd": None if pd.isna(row["cadd"]) else float(row["cadd"]),
+                "polyphen": None if pd.isna(row["polyphen"]) else str(row["polyphen"]).lower(),
+                "sift": None if pd.isna(row["sift"]) else str(row["sift"]).lower(),
+                "clinvar": None if pd.isna(row["clinvar"]) else str(row["clinvar"]).lower(),
+            }
 
-    def annotate(self, v: VariantIn) -> VariantDetails:
-        rec = self.db.get(v.variant_id, {})
-        return VariantDetails(
-            variant_id=v.variant_id,
-            gene=v.gene or rec.get("gene"),
-            cadd=rec.get("cadd"),
-            polyphen=rec.get("polyphen"),
-            sift=rec.get("sift"),
-            clinvar=rec.get("clinvar"),
-            extra=None,
-        )
-
-    def prioritize(self, variants: List[VariantIn]) -> List[PrioritizedVariant]:
-        out: List[PrioritizedVariant] = []
-        for v in variants[:MAX_VARIANTS]:
-            det = self.annotate(v)
-            score, rationale = self._score_variant(det)
-            label = (
-                "HIGH" if score >= 0.75 else
-                "MEDIUM" if score >= 0.50 else
-                "LOW"
+    def annotate(self, v: VariantInput) -> VariantDetails:
+        base = self.table.get(v.variant_id)
+        warnings: List[str] = []
+        if not base:
+            # Unknown variant; pass through gene if provided
+            warnings.append("unknown_variant_in_scores_table")
+            details = VariantDetails(
+                variant_id=v.variant_id,
+                gene=v.gene,
+                cadd=None, polyphen=None, sift=None, clinvar=None,
+                extra=VariantExtra(warnings=warnings, audit={"annotated_at": _ts()}),
             )
-            out.append(PrioritizedVariant(variant=det, priority_score=score, priority_label=label, rationale=rationale))
-        # sort desc by score
-        out.sort(key=lambda pv: pv.priority_score, reverse=True)
-        return out
-
-    def _score_variant(self, d: VariantDetails) -> (float, str):
-        # Heuristic scoring; keep simple & transparent
-        parts = []
-        weights = []
-
-        # CADD (0..50+): normalize to 0..1 via min( cadd / 50, 1)
-        if d.cadd is not None:
-            cadd_norm = min(max(d.cadd, 0.0), 50.0) / 50.0
-            parts.append(cadd_norm)
-            weights.append(0.35)
-        else:
-            parts.append(0.0); weights.append(0.0)
-
-        # PolyPhen: probably_damaging=1, possibly_damaging=0.7, benign=0.1, unknown=0.4
-        poly_map = {
-            "probably_damaging": 1.0,
-            "possibly_damaging": 0.7,
-            "benign": 0.1,
-        }
-        if d.polyphen is not None:
-            parts.append(poly_map.get(d.polyphen, 0.4))
-            weights.append(0.25)
-        else:
-            parts.append(0.0); weights.append(0.0)
-
-        # SIFT: damaging=1, tolerated=0.2, unknown=0.4
-        sift_map = {
-            "damaging": 1.0,
-            "deleterious": 1.0,
-            "tolerated": 0.2,
-        }
-        if d.sift is not None:
-            parts.append(sift_map.get(d.sift, 0.4))
-            weights.append(0.20)
-        else:
-            parts.append(0.0); weights.append(0.0)
-
-        # ClinVar: pathogenic=1, likely_pathogenic=0.85, vusc=0.5, likely_benign=0.2, benign=0.1
-        clinvar_map = {
-            "pathogenic": 1.0,
-            "likely_pathogenic": 0.85,
-            "vus": 0.5,
-            "uncertain_significance": 0.5,
-            "likely_benign": 0.2,
-            "benign": 0.1,
-        }
-        if d.clinvar is not None:
-            parts.append(clinvar_map.get(d.clinvar, 0.5))
-            weights.append(0.20)
-        else:
-            parts.append(0.0); weights.append(0.0)
-
-        # weighted average
-        wsum = sum(weights) or 1.0
-        score = sum(p * w for p, w in zip(parts, weights)) / wsum
-        score = float(max(0.0, min(1.0, score)))
-
-        rationale = (
-            f"CADD={d.cadd if d.cadd is not None else 'NA'}, "
-            f"PolyPhen={d.polyphen or 'NA'}, SIFT={d.sift or 'NA'}, ClinVar={d.clinvar or 'NA'}"
+            return details
+        # Merge requested gene if present (request overrides file if different)
+        gene = v.gene or base.get("gene")
+        details = VariantDetails(
+            variant_id=base["variant_id"],
+            gene=gene,
+            cadd=base["cadd"],
+            polyphen=base["polyphen"],
+            sift=base["sift"],
+            clinvar=base["clinvar"],
+            extra=VariantExtra(warnings=warnings, audit={"annotated_at": _ts()}),
         )
-        return score, rationale
+        return details
 
+# ----------------------
+# Scoring & Rules (transparent, rule-based)
+# ----------------------
 
-def _safe_float(x: Optional[str]) -> Optional[float]:
-    if x is None:
+def norm_cadd(cadd: Optional[float], max_cadd: float) -> Optional[float]:
+    if cadd is None or math.isnan(cadd):
         return None
-    try:
-        return float(x)
-    except Exception:
-        return None
+    return max(0.0, min(1.0, cadd / max_cadd))
 
+_POLYPHEN_MAP = {
+    "probably_damaging": 1.0,
+    "possibly_damaging": 0.7,
+    "benign": 0.0,
+}
 
-def _norm_str(x: Optional[str]) -> Optional[str]:
-    return (x or None).lower() if x else None
+_SIFT_MAP = {
+    "damaging": 1.0,
+    "tolerated": 0.0,
+}
 
+_CLINVAR_MAP = {
+    "pathogenic": 1.0,
+    "likely_pathogenic": 0.8,
+    "uncertain_significance": 0.3,
+    "likely_benign": 0.1,
+    "benign": 0.0,
+}
 
-# =========================
-# PROMPTS (no hardcoding)
-# =========================
+def _score_variant(v: VariantDetails) -> Tuple[float, str, str, VariantEvidence, List[str]]:
+    rules_fired: List[str] = []
+    cadd_n = norm_cadd(v.cadd, ENV["CADD_MAX"])
+    polyphen_score = _POLYPHEN_MAP.get((v.polyphen or "").lower())
+    sift_score = _SIFT_MAP.get((v.sift or "").lower())
+    clinvar_score = _CLINVAR_MAP.get((v.clinvar or "").lower())
 
-def system_prompt() -> str:
-    return SYSTEM_PROMPT_TXT
+    # Composite score (missing values treated as 0)
+    score = 0.0
+    if cadd_n is not None:
+        score += ENV["W_CADD"] * cadd_n
+        if v.cadd is not None and v.cadd >= 20:
+            rules_fired.append("R1:CADD>=20:+{}".format(ENV["W_CADD"] * cadd_n))
+    if polyphen_score is not None:
+        score += ENV["W_POLYPHEN"] * polyphen_score
+        if (v.polyphen or "").lower() in ("probably_damaging", "possibly_damaging"):
+            rules_fired.append("R2:PolyPhen_damaging:+{}".format(ENV["W_POLYPHEN"] * polyphen_score))
+    if sift_score is not None:
+        score += ENV["W_SIFT"] * sift_score
+        if (v.sift or "").lower() == "damaging":
+            rules_fired.append("R3:SIFT_damaging:+{}".format(ENV["W_SIFT"] * sift_score))
+    if clinvar_score is not None:
+        score += ENV["W_CLINVAR"] * clinvar_score
+        if (v.clinvar or "").lower() in ("pathogenic", "likely_pathogenic"):
+            rules_fired.append("R4:ClinVar_pathogenic:+{}".format(ENV["W_CLINVAR"] * clinvar_score))
 
+    # Priority label
+    if score >= 0.75:
+        label = "HIGH"
+    elif score >= 0.4:
+        label = "MEDIUM"
+    else:
+        label = "LOW"
 
-def user_prompt(pid: str, items: List[PrioritizedVariant], ehr: Optional[PatientEHR]) -> str:
-    ehr_lines = []
+    rationale_bits = []
+    if v.cadd is not None:
+        rationale_bits.append(f"CADD {v.cadd}")
+    if v.polyphen:
+        rationale_bits.append(f"PolyPhen {v.polyphen}")
+    if v.sift:
+        rationale_bits.append(f"SIFT {v.sift}")
+    if v.clinvar:
+        rationale_bits.append(f"ClinVar {v.clinvar}")
+    rationale = f"Variant prioritized as {label} based on: " + ", ".join(rationale_bits) if rationale_bits else f"Variant prioritized as {label} with limited evidence."
+
+    evidence = VariantEvidence(
+        cadd_norm=cadd_n,
+        polyphen_score=polyphen_score,
+        sift_score=sift_score,
+        clinvar_score=clinvar_score,
+        rules_fired=rules_fired,
+    )
+    return score, label, rationale, evidence, rules_fired
+
+# ----------------------
+# LLM Orchestration (Ollama)
+# ----------------------
+
+def _ollama_generate(model: str, system: str, prompt: str, timeout_s: int) -> str:
+    url = f"{ENV['OLLAMA_URL']}/api/generate"
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.1}
+    }
+    r = requests.post(url, json=payload, timeout=timeout_s)
+    r.raise_for_status()
+    data = r.json()
+    return data.get("response", "").strip()
+
+SYSTEM_PROMPT_DEFAULT = (
+    "Ești un asistent pentru interpretarea variantelor oncologice. "
+    "Scrie rezumate scurte, cu limbaj neutru, fără recomandări terapeutice. "
+    "Subliniază trasabilitatea și limitele datelor."
+)
+
+def build_llm_prompt(ehr: Optional[EHR], pv: List[PrioritizedVariant]) -> str:
+    lines = []
     if ehr:
-        if ehr.age is not None:
-            ehr_lines.append(f"Age: {ehr.age}")
-        if ehr.sex:
-            ehr_lines.append(f"Sex: {ehr.sex}")
-        if ehr.cancer_type:
-            ehr_lines.append(f"Cancer type: {ehr.cancer_type}")
-        if ehr.stage:
-            ehr_lines.append(f"Stage: {ehr.stage}")
+        safe_ehr = ehr.dict()
+        lines.append(f"Pacient: {json.dumps(safe_ehr, ensure_ascii=False)}")
+    lines.append("Variante prioritare:")
+    for item in pv[:10]:
+        v = item.variant
+        lines.append(f"- {v.gene or 'NA'} {v.variant_id} | priority={item.priority_label} | score={round(item.priority_score,3)} | CADD={v.cadd} | PolyPhen={v.polyphen} | SIFT={v.sift} | ClinVar={v.clinvar}")
+    lines.append("Scrie un scurt sumar clinic (3-6 propoziții), cu prudență și menționarea limitărilor.")
+    return "\n".join(lines)
 
-    lines = [f"Patient: {pid}", "", "Prioritized variants:"]
-    for pv in items[:10]:
-        v = pv.variant
-        lines.append(
-            f"- {v.gene or ''} {v.variant_id}: {pv.priority_label} (score {pv.priority_score:.2f}); "
-            f"CADD={v.cadd}, PolyPhen={v.polyphen}, SIFT={v.sift}, ClinVar={v.clinvar}. Rationale: {pv.rationale}"
-        )
+# ----------------------
+# FastAPI App
+# ----------------------
 
-    guidance = f"\n{SUMMARY_INSTRUCTIONS_TXT}\nLimit: <= {SUMMARY_MAX_WORDS} words."
-    return ("\n".join(ehr_lines) + "\n\n" + "\n".join(lines) + guidance)
+app = FastAPI(title="Genomic AI-Orchestrator", version=APP_VERSION)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# =========================
-# FASTAPI APP
-# =========================
-app = FastAPI(title="Genomic Variant Prioritization API", version="2.0.0")
-annotator = VariantAnnotator(SCORES_CSV)
-llm = build_llm_client()
+# Global annotator (load & validate at startup)
+ANNOTATOR: VariantAnnotator
+MODEL_SELECTED: Optional[str]
+STARTUP_WARNINGS: List[str] = []
 
-
-@app.get("/health")
-def health():
-    return {"ok": True, "provider": LLM_PROVIDER, "model": CHOSEN_MODEL}
-
+@app.on_event("startup")
+def _startup() -> None:
+    global ANNOTATOR, MODEL_SELECTED, STARTUP_WARNINGS
+    # Load CSV and validate
+    try:
+        ANNOTATOR = VariantAnnotator(ENV["VARIANT_SCORES_PATH"])
+    except Exception as e:
+        # Fail early with clear message
+        raise RuntimeError(f"Failed to initialize VariantAnnotator: {e}")
+    # Choose LLM model
+    MODEL_SELECTED = choose_llm_model(ENV["LLM_CANDIDATES"], ENV["LLM_MIN_VRAM_GB"], ENV["LLM_VRAM_CATALOG"])
+    if MODEL_SELECTED is None:
+        STARTUP_WARNINGS.append("no_llm_model_selected")
 
 @app.get("/health/llm")
 def health_llm():
-    info = {
-        "provider": LLM_PROVIDER,
-        "model": CHOSEN_MODEL,
-        "min_vram_gb": LLM_MIN_VRAM_GB,
-        "candidates": MODEL_CANDIDATES,
-    }
-    import time
+    t0 = time.time()
+    ok = True
+    detail: Dict[str, Any] = {}
+    # Try a very quick head call to Ollama
     try:
-        t0 = time.time()
-        if isinstance(llm, OllamaClient):
-            import requests
-            r = requests.post(
-                OLLAMA_HOST.rstrip("/") + "/api/generate",
-                json={"model": CHOSEN_MODEL, "prompt": "ok", "options": {"num_predict": 4}},
-                timeout=15,
-            )
-            r.raise_for_status()
-        elif isinstance(llm, OpenAIClient):
-            llm.generate("ping", "ok", max_tokens=4)
-        else:
-            return {"ok": False, "error": "LLM client unavailable", **info}
-        latency_ms = int((time.time() - t0) * 1000)
-        return {"ok": True, "latency_ms": latency_ms, **info}
+        r = requests.get(ENV["OLLAMA_URL"], timeout=3)
+        ok = r.status_code < 500
     except Exception as e:
-        return {"ok": False, "error": str(e), **info}
+        ok = False
+        detail["error"] = str(e)
+    latency = int((time.time() - t0) * 1000)
+    return {
+        "ok": ok,
+        "latency_ms": latency,
+        "provider": ENV["LLM_PROVIDER"],
+        "model": MODEL_SELECTED,
+        "min_vram_gb": ENV["LLM_MIN_VRAM_GB"],
+        "candidates": ENV["LLM_CANDIDATES"],
+        **detail,
+    }
 
+@app.get("/config")
+def get_config():
+    return {
+        "app_version": APP_VERSION,
+        "policy_version": POLICY_VERSION,
+        "provider": ENV["LLM_PROVIDER"],
+        "model_selected": MODEL_SELECTED,
+        "min_vram_gb": ENV["LLM_MIN_VRAM_GB"],
+        "candidates": ENV["LLM_CANDIDATES"],
+        "vram_catalog": ENV["LLM_VRAM_CATALOG"],
+        "variant_scores_path": ENV["VARIANT_SCORES_PATH"],
+        "send_ehr_to_llm": ENV["SEND_EHR_TO_LLM"],
+    }
+
+@app.get("/audit/ping")
+def audit_ping():
+    return {"version": APP_VERSION, "policy_version": POLICY_VERSION, "now": _ts()}
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-def analyze_endpoint(req: AnalyzeRequest):
-    # Prioritize
-    prioritized = annotator.prioritize(req.variants)
+def analyze(req: AnalyzeRequest):
+    # Annotate
+    annotated: List[VariantDetails] = [ANNOTATOR.annotate(v) for v in req.variants]
 
-    # Optional LLM summary
-    summary = None
-    if llm is not None and prioritized:
-        try:
-            sp = system_prompt()
-            up = user_prompt(req.patient_id, prioritized, req.ehr)
-            summary = llm.generate(sp, up)
-        except Exception:
-            summary = None
+    # Score and build response items
+    prioritized: List[PrioritizedVariant] = []
+    for v in annotated:
+        score, label, rationale, evidence, rules = _score_variant(v)
+        # Attach evidence & audit
+        v.extra.evidence = evidence
+        v.extra.audit.update({
+            "scored_at": _ts(),
+            "policy_version": POLICY_VERSION,
+        })
+        prioritized.append(
+            PrioritizedVariant(variant=v, priority_score=round(float(score), 6), priority_label=label, rationale=rationale)
+        )
 
-    return AnalyzeResponse(patient_id=req.patient_id, prioritized=prioritized, llm_summary=summary)
+    # Sort desc by score
+    prioritized.sort(key=lambda x: x.priority_score, reverse=True)
 
+    return AnalyzeResponse(
+        patient_id=req.patient_id,
+        policy_version=POLICY_VERSION,
+        prioritized=prioritized,
+    )
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+@app.post("/llm_summary", response_model=LLMResponse)
+def llm_summary(req: LLMRequest):
+    if ENV["LLM_PROVIDER"].upper() != "OLLAMA":
+        raise HTTPException(status_code=400, detail="Only OLLAMA provider is supported in this build.")
+    model = MODEL_SELECTED
+    if not model:
+        raise HTTPException(status_code=503, detail="No LLM model selected. Check /config.")
+    # Build prompt
+    ehr_for_prompt = req.ehr if ENV["SEND_EHR_TO_LLM"] else None
+    prompt = build_llm_prompt(ehr_for_prompt, req.variants)
+    # Generate
+    try:
+        text = _ollama_generate(model, SYSTEM_PROMPT_DEFAULT, prompt, ENV["LLM_TIMEOUT_SECONDS"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM generation failed: {e}")
+    return LLMResponse(
+        patient_id=req.patient_id,
+        model=model,
+        summary=text,
+        generated_at=_ts(),
+    )

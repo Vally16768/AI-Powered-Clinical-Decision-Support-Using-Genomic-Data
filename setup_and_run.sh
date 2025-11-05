@@ -1,54 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-#!/usr/bin/env bash
-set -euo pipefail
-
-# --- Safe .env loader (supports spaces and commas in values)
-if [[ -f .env ]]; then
-  echo "• Loading environment from .env"
-  while IFS='=' read -r key value; do
-    # skip empty lines or comments
-    [[ -z "$key" || "$key" =~ ^# ]] && continue
-    # trim whitespace and export correctly
-    key=$(echo "$key" | xargs)
-    value=$(echo "$value" | sed 's/^ *//;s/ *$//')
-    export "$key"="$value"
-  done < .env
-fi
-
-
-PORT="${PORT:-8000}"
-LLM_PROVIDER="${LLM_PROVIDER:-OLLAMA}"
-OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-MODEL_CANDIDATES="${MODEL_CANDIDATES:-}"
-
-# ------- Optional: start Ollama if provider is OLLAMA
-if [[ "${LLM_PROVIDER}" == "OLLAMA" ]]; then
-  if ! pgrep -x "ollama" >/dev/null 2>&1; then
-    echo "• Starting Ollama daemon..."
-    nohup ollama serve >/dev/null 2>&1 &
-    sleep 2
-  fi
-
-  # Pre-pull all candidates to avoid cold-start latency
-  if [[ -n "${MODEL_CANDIDATES}" ]]; then
-    IFS=',' read -ra CANDS <<< "${MODEL_CANDIDATES}"
-    echo "• Pre-pulling candidates: ${CANDS[*]}"
-    for m in "${CANDS[@]}"; do
-      m_trimmed="$(echo "$m" | xargs)"
-      [[ -z "$m_trimmed" ]] && continue
-      ollama pull "$m_trimmed" || true
-    done
-  fi
-fi
-
-# ---------- Python deps
+echo "[+] Creating virtualenv (if missing) ..."
 python3 -m venv .venv || true
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install fastapi uvicorn python-dotenv requests
 
-# ---------- Run API
-echo "• Starting API on :$PORT"
-exec uvicorn app:app --host 0.0.0.0 --port "$PORT" --reload
+echo "[+] Installing deps ..."
+pip install --upgrade pip
+pip install fastapi uvicorn pandas requests pydantic
+
+# Pull Ollama models (optional)
+if command -v ollama >/dev/null 2>&1; then
+  echo "[+] Pulling Ollama candidates (if available) ..."
+  python - <<'PY'
+import os, json, subprocess
+cands = json.loads(os.getenv("LLM_CANDIDATES",'["qwen2.5:3b-instruct","phi3:mini","qwen2.5:7b-instruct","llama3:8b-instruct"]'))
+for m in cands:
+    try:
+        import subprocess, os
+        subprocess.run(["ollama","pull",m], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+PY
+else
+  echo "[!] Ollama not found on PATH; /llm_summary will not work until it's installed and running."
+fi
+
+echo "[+] Starting API at http://127.0.0.1:8000 ..."
+echo "    New endpoints: GET /config, GET /audit/ping"
+uvicorn app:app --host 0.0.0.0 --port 8000
