@@ -92,7 +92,7 @@
   white-space: normal;          /* allow wrapping */
   word-break: break-word;       /* wrap long tokens/URLs */
 }
-.table th { background: #222; position: sticky; top: 0; }
+.table th { background: #222; position: sticky; top: 0; min-width: 4vw; }
 
 .num { font-size: 12px; }       /* "numbers should keep small" */
 .center { text-align: center; }
