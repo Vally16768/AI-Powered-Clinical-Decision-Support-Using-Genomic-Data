@@ -11,7 +11,7 @@ async function apiFetch(path, { method = 'GET', headers = {}, body, isForm = fal
   const text = await res.text()
   const data = text ? JSON.parse(text) : {}
   const requestId = res.headers.get('X-Request-ID') || data?.request_id || null
-  const durMs = res.headers.get('X-Duration-MS') || data?.duration_ms || null
+  const durMs = res.headers.get('X-Response-Time-MS') || data?.duration_ms || null
   return { ok: res.ok, status: res.status, data, headers: res.headers, requestId, durMs }
 }
 
@@ -21,6 +21,16 @@ function fmtMs(ms) {
   if (Number.isNaN(n)) return String(ms)
   if (n < 1000) return `${n} ms`
   return `${(n / 1000).toFixed(2)} s`
+}
+
+function Banner({ type='info', children }) {
+  const bg = type === 'error' ? '#3b1111' : type === 'warn' ? '#3b2d11' : '#11263b'
+  const br = type === 'error' ? '#a33' : type === 'warn' ? '#a87' : '#79a9dd'
+  return (
+    <div style={{ background:bg, border:`1px solid ${br}`, padding:'8px 12px', borderRadius:8, margin:'8px 0' }}>
+      {children}
+    </div>
+  )
 }
 
 function DownloadButton({ filename, mime = 'application/json', getBlob }) {
@@ -61,16 +71,9 @@ function InfoTip({ text }) {
     let left = b.left
     let transform = 'translateX(0)'
 
-    if (left + t.width > vw - 8) {
-      left = Math.max(8, b.right - t.width)
-    }
-    if (left < 8) {
-      left = Math.max(8, b.left + b.width / 2 - t.width / 2)
-      transform = 'translateX(0)'
-    }
-    if (top + t.height > vh - 8) {
-      top = Math.max(8, b.top - t.height - 6)
-    }
+    if (left + t.width > vw - 8) left = Math.max(8, b.right - t.width)
+    if (left < 8) left = Math.max(8, b.left + b.width / 2 - t.width / 2)
+    if (top + t.height > vh - 8) top = Math.max(8, b.top - t.height - 6)
 
     setPos({ top, left, transform })
   }, [open, text])
@@ -108,6 +111,8 @@ function InfoTip({ text }) {
             top: pos.top,
             left: pos.left,
             transform: pos.transform,
+            maxWidth: 360,
+            zIndex: 20
           }}
         >
           {text}
@@ -131,6 +136,29 @@ export default function App() {
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+
+  const [llmHealth, setLlmHealth] = useState({ ok: null, provider: '—', models: [], error: null, host: '', selected_model: null, candidates: [], min_vram_gb: null, reachable: false })
+
+  useEffect(() => {
+    (async () => {
+      const h = await apiFetch('/health/llm')
+      if (h.ok) {
+        setLlmHealth({
+          ok: h.data.ok,
+          provider: h.data.provider,
+          models: h.data.models || [],
+          error: h.data.error || null,
+          host: h.data.host || '',
+          selected_model: h.data.selected_model || null,
+          candidates: h.data.candidates || [],
+          min_vram_gb: h.data.min_vram_gb ?? null,
+          reachable: !!h.data.reachable
+        })
+      } else {
+        setLlmHealth({ ok: false, provider: '—', models: [], error: `HTTP ${h.status}`, host: '', selected_model: null, candidates: [], min_vram_gb: null, reachable: false })
+      }
+    })()
+  }, [])
 
   async function maybeUploadFiles() {
     if (!variantFile && !ehrFile) return { ok: true }
@@ -185,7 +213,7 @@ export default function App() {
         priority_label: v.priority_label,
         rationale: v.rationale || ''
       })),
-      ehr: analysis.ehr || null
+      ehr: analysis.ehr ? analysis.ehr : null
     }
 
     setBusy(true); setError(null)
@@ -258,6 +286,11 @@ export default function App() {
     return s
   }
 
+  function copy(text) {
+    if (!text) return
+    navigator.clipboard.writeText(text).catch(() => {})
+  }
+
   return (
     <div className="page">
       {busy && (
@@ -268,14 +301,36 @@ export default function App() {
 
       <h1 className="h1">Genomic CDSS — Clinician Dashboard</h1>
 
+      {/* LLM health banner */}
+      {llmHealth.provider === 'OLLAMA' && llmHealth.ok === false && (
+        <Banner type="error">
+          <b>LLM unavailable.</b> The system is using the rule-based fallback.
+          <div style={{ marginTop: 6 }}>
+            <div><b>Host:</b> <code>{llmHealth.host || '(unset)'}</code></div>
+            <div><b>Reachable:</b> {llmHealth.reachable ? 'yes' : 'no'}</div>
+            <div><b>Selected (by VRAM):</b> {llmHealth.selected_model || '—'}</div>
+            <div><b>Candidates:</b> {Array.isArray(llmHealth.candidates) ? llmHealth.candidates.join(', ') : String(llmHealth.candidates || '—')}</div>
+            <div><b>Min VRAM:</b> {llmHealth.min_vram_gb ?? '—'} GB</div>
+            <div style={{ marginTop: 6 }}>
+              Backend error: <code>{llmHealth.error || 'connection to Ollama failed'}</code>
+            </div>
+            <div>Detected models: {llmHealth.models?.length ? llmHealth.models.join(', ') : '—'}</div>
+            <div style={{ opacity: 0.85, marginTop: 6 }}>
+              Tip: ensure Ollama is running and accessible at the host above
+              (e.g., <code>ollama serve</code>), and that a model is pulled (e.g., <code>ollama pull {llmHealth.selected_model || 'qwen2.5:7b-instruct'}</code>).
+            </div>
+          </div>
+        </Banner>
+      )}
+
       <div className="transparency">
-        <div><b>Model LLM:</b> {summary?.model || '—'}</div>
+        <div><b>Model LLM:</b> {summary?.model || (llmHealth.ok ? '—' : 'fallback-rule-based')}</div>
         <div><b>Policy version:</b> {analysis?.policy_version || '—'}</div>
         <div><b>Analyze time:</b> {fmtMs(analysisMeta.durationMs)}</div>
         <div><b>Summary time:</b> {fmtMs(summaryMeta.durationMs)}</div>
         <div><b>X-Request-ID (analyze):</b> {analysisMeta.requestId || '—'}</div>
         <div><b>X-Request-ID (summary):</b> {summaryMeta.requestId || '—'}</div>
-        <div><b>generated_at:</b> {summary ? new Date().toISOString() : '—'}</div>
+        {summary?.used_fallback && <div><b>LLM status:</b> Fallback used</div>}
       </div>
 
       <section className="card">
@@ -347,7 +402,26 @@ Fields listed in REDACT_EHR_FIELDS are redacted from LLM prompts.`
       <section className="card">
         <h2 className="h2">3) AI overview</h2>
         {summary?.summary ? (
-          <pre className="summary-box">{summary.summary}</pre>
+          <>
+            {summary?.used_fallback && (
+              <Banner type="warn">
+                Using fallback (LLM unavailable). Start Ollama and pull a model to enable AI text.
+              </Banner>
+            )}
+            <pre className="summary-box">{summary.summary}</pre>
+
+            {summary?.prompt && (
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ cursor: 'pointer' }}>
+                  Show prompt used (debug)
+                </summary>
+                <div style={{ marginTop: 8 }}>
+                  <button className="button-secondary" onClick={() => copy(summary.prompt)}>Copy prompt</button>
+                </div>
+                <pre className="summary-box" style={{ marginTop: 8 }}>{summary.prompt}</pre>
+              </details>
+            )}
+          </>
         ) : (
           <p>—</p>
         )}
