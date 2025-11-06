@@ -7,7 +7,7 @@ source .venv/bin/activate
 
 echo "[+] Installing deps ..."
 pip install --upgrade pip
-pip install fastapi uvicorn pandas requests pydantic python-dotenv python-multipart pyyaml
+pip install fastapi uvicorn pandas requests pydantic python-dotenv python-multipart pyyaml httpx
 
 # Pull Ollama models (optional, env-driven only)
 if command -v ollama >/dev/null 2>&1; then
